@@ -1,0 +1,820 @@
+namespace Death_and_Access;
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using HarmonyLib;
+using MelonLoader;
+
+internal static class TypeResolver
+{
+    private static readonly Dictionary<string, Type> Cache = new(StringComparer.Ordinal);
+    private static readonly object Sync = new();
+
+    internal static Type Get(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return null;
+
+        lock (Sync)
+        {
+            if (Cache.TryGetValue(name, out var cached))
+                return cached;
+        }
+
+        Type type = null;
+        try
+        {
+            type = AccessTools.TypeByName(name);
+        }
+        catch
+        {
+            type = null;
+        }
+
+        type ??= Type.GetType(name);
+
+        if (type == null)
+        {
+            try
+            {
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    type = assembly.GetType(name, false);
+                    if (type != null)
+                        break;
+                }
+            }
+            catch
+            {
+                type = null;
+            }
+        }
+
+        lock (Sync)
+        {
+            Cache[name] = type;
+        }
+
+        return type;
+    }
+}
+
+internal static class TextSanitizer
+{
+    internal static string StripRichTextTags(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        var builder = new StringBuilder(value.Length);
+        var inTag = false;
+        for (var i = 0; i < value.Length; i++)
+        {
+            var ch = value[i];
+            if (!inTag && ch == '&' && i + 3 < value.Length
+                && string.Compare(value, i, "&lt;", 0, 4, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                var end = value.IndexOf("&gt;", i + 4, StringComparison.OrdinalIgnoreCase);
+                if (end >= 0)
+                {
+                    i = end + 3;
+                    i--;
+                    continue;
+                }
+            }
+
+            if (ch == '<')
+            {
+                inTag = true;
+                continue;
+            }
+
+            if (ch == '>')
+            {
+                inTag = false;
+                continue;
+            }
+
+            if (!inTag)
+                builder.Append(ch);
+        }
+
+        return builder.ToString();
+    }
+
+    internal static string RemoveInsensitive(string input, string token)
+    {
+        if (string.IsNullOrEmpty(input) || string.IsNullOrEmpty(token))
+            return input ?? string.Empty;
+
+        var result = input;
+        var index = result.IndexOf(token, StringComparison.OrdinalIgnoreCase);
+        while (index >= 0)
+        {
+            result = result.Remove(index, token.Length);
+            index = result.IndexOf(token, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return result;
+    }
+}
+
+internal static class ReflectionUtils
+{
+    internal static bool TryGetProperty(Type type, object instance, string name, out object value)
+    {
+        value = null;
+        if (type == null || instance == null || string.IsNullOrWhiteSpace(name))
+            return false;
+
+        try
+        {
+            var prop = type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (prop == null)
+                return false;
+
+            value = prop.GetValue(instance);
+            return value != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal static bool TryGetBoolProperty(Type type, object instance, string name, out bool value)
+    {
+        value = false;
+        if (!TryGetProperty(type, instance, name, out var obj))
+            return false;
+
+        if (obj is bool boolValue)
+        {
+            value = boolValue;
+            return true;
+        }
+
+        return false;
+    }
+}
+
+/// <summary>
+/// Provides screenreader functionality and text-to-speech support
+/// Uses PowerShell subprocess to access Windows System.Speech via PowerShell's .NET access
+/// </summary>
+public class ScreenreaderProvider : IDisposable
+{
+    private readonly Queue<string> _announcementQueue;
+    private bool _isSpeaking;
+    private bool _enabled;
+    private bool _externalScreenreaderActive;
+    private int _nextScreenreaderCheckTick;
+    private const int ScreenreaderCheckIntervalMs = 2000;
+    private bool _uiaAvailableChecked;
+    private bool _uiaAvailable;
+    private bool _nvdaAvailableChecked;
+    private bool _nvdaAvailable;
+    private bool _jawsAvailableChecked;
+    private bool _jawsAvailable;
+    private object _jawsApi;
+    private MethodInfo _jawsSayString;
+    private string _lastAnnouncedText;
+    private int _lastAnnouncedTick;
+    private const int RepeatAnnounceCooldownMs = 1000;
+    private const int MaxQueueLength = 100;
+    private int _suppressHoverUntilTick;
+
+    private static readonly HashSet<string> ExternalScreenreaderProcessNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "nvda",
+        "jfw",
+        "jfwui",
+        "fsd",
+        "narrator",
+        "narratorui",
+        "narratorapp",
+        "narratorhost",
+        "systemaccess",
+        "zoomtext",
+        "zoomtextax",
+        "fusion",
+        "supernova",
+        "supernovacore",
+        "dolphin",
+        "hal",
+        "orca",
+        "voiceover",
+        "voiceoverui",
+        "voiceoverhud",
+        "voutil"
+    };
+
+    private const int SPI_GETSCREENREADER = 0x0046;
+
+    [DllImport("user32.dll", SetLastError = false)]
+    private static extern bool SystemParametersInfo(int uiAction, int uiParam, ref int pvParam, int fWinIni);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("UIAutomationCore.dll", CharSet = CharSet.Unicode)]
+    private static extern int UiaRaiseNotificationEvent(
+        IntPtr provider,
+        NotificationKind notificationKind,
+        NotificationProcessing notificationProcessing,
+        string displayString,
+        string activityId);
+
+    [DllImport("UIAutomationCore.dll")]
+    private static extern int UiaHostProviderFromHwnd(IntPtr hwnd, out IntPtr provider);
+
+    [DllImport("UIAutomationCore.dll")]
+    private static extern bool UiaClientsAreListening();
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string lpFileName);
+
+
+    /// <summary>
+    /// Gets or sets whether the screenreader is enabled
+    /// </summary>
+    public bool Enabled
+    {
+        get => _enabled;
+        set
+        {
+            _enabled = value;
+            if (!_enabled)
+            {
+                _announcementQueue.Clear();
+                _isSpeaking = false;
+                TryCancelAllSpeech();
+            }
+        }
+    }
+
+    public bool IsBusy => _isSpeaking || _announcementQueue.Count > 0;
+
+    public ScreenreaderProvider()
+    {
+        _announcementQueue = new Queue<string>();
+        _isSpeaking = false;
+        _enabled = true;
+        
+        MelonLogger.Msg("ScreenreaderProvider: Initialized - will use PowerShell for TTS");
+    }
+
+    public void Announce(string text)
+    {
+        AnnounceInternal(text, isPriority: false);
+    }
+    public void AnnouncePriority(string text)
+    {
+        AnnounceInternal(text, isPriority: true);
+    }
+
+    public void SuppressHoverFor(int ms)
+    {
+        if (ms <= 0)
+            return;
+
+        var until = Environment.TickCount + ms;
+        if (until > _suppressHoverUntilTick)
+            _suppressHoverUntilTick = until;
+    }
+
+    public bool ShouldSuppressHover()
+    {
+        return Environment.TickCount <= _suppressHoverUntilTick;
+    }
+
+    private void AnnounceInternal(string text, bool isPriority)
+    {
+        if (!_enabled || string.IsNullOrWhiteSpace(text))
+            return;
+
+        text = TextSanitizer.StripRichTextTags(text);
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        if (!isPriority && ShouldSuppressRepeat(text))
+            return;
+
+        if (isPriority)
+        {
+            UpdateLastAnnouncement(text);
+            SuppressHoverFor(750);
+        }
+
+        UpdateExternalScreenreaderStatus();
+        if (TrySpeakViaExternalScreenreader(text, isPriority: isPriority, allowUia: _externalScreenreaderActive))
+        {
+            if (isPriority)
+            {
+                ClearQueueAndResetSpeaking();
+            }
+            return;
+        }
+
+        if (isPriority && _isSpeaking)
+        {
+            TryCancelAllSpeech();
+        }
+
+        if (isPriority)
+        {
+            _announcementQueue.Clear();
+        }
+
+        EnqueueAnnouncement(text);
+        ProcessQueue();
+    }
+
+    private void ProcessQueue()
+    {
+        UpdateExternalScreenreaderStatus();
+        if (_externalScreenreaderActive)
+            return;
+
+        if (_isSpeaking || _announcementQueue.Count == 0 || !_enabled)
+            return;
+
+        _isSpeaking = true;
+
+        try
+        {
+            while (_announcementQueue.Count > 0 && _enabled)
+            {
+                var text = _announcementQueue.Dequeue();
+                if (!TrySpeakViaExternalScreenreader(text, isPriority: false, allowUia: _externalScreenreaderActive))
+                {
+                    SpeakViaPowerShell(text);
+                }
+                UpdateExternalScreenreaderStatus();
+                if (_externalScreenreaderActive)
+                {
+                    ClearQueueAndResetSpeaking();
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            MelonLogger.Error("ProcessQueue: Exception during speech: " + ex.Message);
+        }
+        finally
+        {
+            _isSpeaking = false;
+        }
+    }
+
+    private void SpeakViaPowerShell(string text)
+    {
+        try
+        {
+            // Escape single quotes in the text
+            string escapedText = text.Replace("'", "''");
+            
+            // PowerShell command to use System.Speech - must load assembly first
+            string psCommand = "[System.Reflection.Assembly]::LoadWithPartialName('System.Speech'); " +
+                              "$speak = New-Object System.Speech.Synthesis.SpeechSynthesizer; " +
+                              "$speak.Speak('" + escapedText + "')";
+            
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = "-NoProfile -Command \"" + psCommand + "\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            using (var process = Process.Start(psi))
+            {
+                // Wait for it to finish (blocking for synchronous speech)
+                if (process != null)
+                {
+                    process.StandardOutput.ReadToEnd();
+                    process.StandardError.ReadToEnd();
+                    process.WaitForExit(10000);  // 10 second timeout
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            MelonLogger.Error("SpeakViaPowerShell: " + ex.Message);
+        }
+    }
+
+    private void ClearQueueAndResetSpeaking()
+    {
+        _announcementQueue.Clear();
+        _isSpeaking = false;
+    }
+
+    private void TryCancelAllSpeech()
+    {
+        // PowerShell processes can't easily be interrupted, so we just move on
+        MelonLogger.Msg("TryCancelAllSpeech: Skipped (PowerShell speech)");
+    }
+
+    private void EnqueueAnnouncement(string text)
+    {
+        while (_announcementQueue.Count >= MaxQueueLength)
+        {
+            _announcementQueue.Dequeue();
+        }
+
+        _announcementQueue.Enqueue(text);
+        UpdateLastAnnouncement(text);
+    }
+
+    private bool ShouldSuppressRepeat(string text)
+    {
+        var now = Environment.TickCount;
+        if (!string.Equals(text, _lastAnnouncedText, StringComparison.Ordinal))
+        {
+            UpdateLastAnnouncement(text, now);
+            return false;
+        }
+
+        var elapsed = unchecked(now - _lastAnnouncedTick);
+        if (elapsed < RepeatAnnounceCooldownMs)
+        {
+            return true;
+        }
+
+        UpdateLastAnnouncement(text, now);
+        return false;
+    }
+
+    private void UpdateLastAnnouncement(string text)
+    {
+        UpdateLastAnnouncement(text, Environment.TickCount);
+    }
+
+    private void UpdateLastAnnouncement(string text, int tick)
+    {
+        _lastAnnouncedText = text;
+        _lastAnnouncedTick = tick;
+    }
+
+    private void UpdateExternalScreenreaderStatus()
+    {
+        var now = Environment.TickCount;
+        if (now < _nextScreenreaderCheckTick)
+            return;
+
+        _nextScreenreaderCheckTick = now + ScreenreaderCheckIntervalMs;
+
+        bool active = IsScreenReaderFlagSet();
+        try
+        {
+            foreach (var process in Process.GetProcesses())
+            {
+                try
+                {
+                    if (ExternalScreenreaderProcessNames.Contains(process.ProcessName))
+                    {
+                        active = true;
+                        break;
+                    }
+                }
+                catch
+                {
+                    // Ignore processes that exit or deny access.
+                }
+            }
+        }
+        catch
+        {
+            // Keep current active state if process enumeration fails.
+        }
+
+        if (active == _externalScreenreaderActive)
+            return;
+
+        _externalScreenreaderActive = active;
+        if (_externalScreenreaderActive)
+        {
+            ClearQueueAndResetSpeaking();
+            MelonLogger.Msg("External screenreader detected - TTS disabled");
+        }
+        else
+        {
+            MelonLogger.Msg("External screenreader not detected - TTS enabled");
+        }
+    }
+
+    private static bool IsScreenReaderFlagSet()
+    {
+        if (!IsWindows())
+            return false;
+
+        if (IsNarratorWindowPresent())
+            return true;
+
+        try
+        {
+            int pvParam = 0;
+            if (SystemParametersInfo(SPI_GETSCREENREADER, 0, ref pvParam, 0))
+            {
+                return pvParam != 0;
+            }
+        }
+        catch
+        {
+            // Ignore failures and fall back to process detection.
+        }
+
+        try
+        {
+            if (UiaClientsAreListening())
+                return true;
+        }
+        catch
+        {
+            // Ignore failures and fall back to UIA window detection.
+        }
+
+        return false;
+    }
+
+    private static bool IsNarratorWindowPresent()
+    {
+        try
+        {
+            var found = false;
+            EnumWindows((hWnd, lParam) =>
+            {
+                var className = new StringBuilder(256);
+                if (GetClassName(hWnd, className, className.Capacity) <= 0)
+                    return true;
+
+                var name = className.ToString();
+                if (name.IndexOf("Narrator", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    found = true;
+                    return false;
+                }
+
+                return true;
+            }, IntPtr.Zero);
+
+            return found;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryRaiseUiaNotification(string text, bool isPriority)
+    {
+        try
+        {
+            if (!IsUiaAvailable())
+                return false;
+
+            var hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero)
+            {
+                hwnd = Process.GetCurrentProcess().MainWindowHandle;
+            }
+
+            if (hwnd == IntPtr.Zero)
+                return false;
+
+            if (UiaHostProviderFromHwnd(hwnd, out var provider) != 0 || provider == IntPtr.Zero)
+                return false;
+
+            var kind = NotificationKind.Other;
+            var processing = isPriority ? NotificationProcessing.ImportantMostRecent : NotificationProcessing.MostRecent;
+            var result = UiaRaiseNotificationEvent(provider, kind, processing, text, "DeathAndAccess");
+            return result == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsUiaAvailable()
+    {
+        if (!IsWindows())
+            return false;
+
+        if (_uiaAvailableChecked)
+            return _uiaAvailable;
+
+        _uiaAvailableChecked = true;
+        try
+        {
+            _uiaAvailable = LoadLibrary("UIAutomationCore.dll") != IntPtr.Zero;
+        }
+        catch
+        {
+            _uiaAvailable = false;
+        }
+        return _uiaAvailable;
+    }
+
+    private static bool IsWindows()
+    {
+        try
+        {
+            return RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        }
+        catch
+        {
+            return Environment.OSVersion.Platform == PlatformID.Win32NT;
+        }
+    }
+
+    private bool TrySpeakViaExternalScreenreader(string text, bool isPriority, bool allowUia)
+    {
+        return TrySpeakNvda(text)
+               || TrySpeakJaws(text, isPriority)
+               || (allowUia && TryRaiseUiaNotification(text, isPriority));
+    }
+
+    private bool TrySpeakNvda(string text)
+    {
+        if (!IsNvdaAvailable())
+            return false;
+
+        try
+        {
+            if (NvdaController.TestIfRunning() != 0)
+                return false;
+
+            NvdaController.Speak(text, interrupt: true);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsNvdaAvailable()
+    {
+        if (_nvdaAvailableChecked)
+            return _nvdaAvailable;
+
+        _nvdaAvailableChecked = true;
+
+        try
+        {
+            var res = NvdaController.TestIfRunning();
+            _nvdaAvailable = true;
+            return true;
+        }
+        catch (DllNotFoundException ex)
+        {
+            _ = ex;
+        }
+        catch (EntryPointNotFoundException ex)
+        {
+            _ = ex;
+        }
+        catch (BadImageFormatException ex)
+        {
+            _ = ex;
+        }
+        catch (Exception ex)
+        {
+            _ = ex;
+        }
+
+        _nvdaAvailable = false;
+        return false;
+    }
+
+    private bool TrySpeakJaws(string text, bool isPriority)
+    {
+        if (!IsJawsAvailable())
+            return false;
+
+        try
+        {
+            var parameters = _jawsSayString.GetParameters();
+            if (parameters.Length == 2)
+            {
+                var interrupt = isPriority ? 1 : 0;
+                _jawsSayString.Invoke(_jawsApi, new object[] { text, interrupt });
+                return true;
+            }
+
+            if (parameters.Length == 1)
+            {
+                _jawsSayString.Invoke(_jawsApi, new object[] { text });
+                return true;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private bool IsJawsAvailable()
+    {
+        if (_jawsAvailableChecked)
+            return _jawsAvailable;
+
+        _jawsAvailableChecked = true;
+
+        try
+        {
+            var apiType = Type.GetTypeFromProgID("FreedomSci.JawsApi");
+            if (apiType == null)
+                return false;
+
+            _jawsApi = Activator.CreateInstance(apiType);
+            if (_jawsApi == null)
+                return false;
+
+            _jawsSayString = apiType.GetMethod("SayString", new[] { typeof(string), typeof(int) })
+                             ?? apiType.GetMethod("SayString", new[] { typeof(string), typeof(bool) })
+                             ?? apiType.GetMethod("SayString", new[] { typeof(string) });
+
+            _jawsAvailable = _jawsSayString != null;
+            return _jawsAvailable;
+        }
+        catch
+        {
+            _jawsAvailable = false;
+            return false;
+        }
+    }
+
+    public void Dispose()
+    {
+        // Nothing to dispose for PowerShell approach
+    }
+}
+
+internal static class NvdaController
+{
+    [DllImport("nvdaControllerClient.dll", CharSet = CharSet.Unicode)]
+    private static extern int nvdaController_speakText(string text);
+
+    [DllImport("nvdaControllerClient.dll")]
+    private static extern int nvdaController_cancelSpeech();
+
+    [DllImport("nvdaControllerClient.dll")]
+    private static extern int nvdaController_testIfRunning();
+
+    public static int TestIfRunning()
+    {
+        return nvdaController_testIfRunning();
+    }
+
+    public static void Speak(string text, bool interrupt)
+    {
+        if (interrupt)
+        {
+            nvdaController_cancelSpeech();
+        }
+
+        var res = nvdaController_speakText(text);
+        if (res != 0)
+        {
+            throw new System.ComponentModel.Win32Exception(res);
+        }
+    }
+}
+
+internal enum NotificationKind
+{
+    ItemAdded = 0,
+    ItemRemoved = 1,
+    ActionCompleted = 2,
+    ActionAborted = 3,
+    Other = 4
+}
+
+internal enum NotificationProcessing
+{
+    ImportantAll = 0,
+    ImportantMostRecent = 1,
+    All = 2,
+    MostRecent = 3,
+    CurrentThenMostRecent = 4
+}
