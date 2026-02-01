@@ -1,9 +1,0 @@
-C:\Users\amock\Death and access\Death and Access\bin\Debug\net472\Death and Access.dll
-C:\Users\amock\Death and access\Death and Access\bin\Debug\net472\Death and Access.pdb
-C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.csproj.AssemblyReference.cache
-C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.GeneratedMSBuildEditorConfig.editorconfig
-C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.AssemblyInfoInputs.cache
-C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.AssemblyInfo.cs
-C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.csproj.CoreCompileInputs.cache
-C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.dll
-C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.pdb
