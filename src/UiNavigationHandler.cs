@@ -4,11 +4,24 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 public sealed class UiNavigationHandler
 {
     private const int AxisRepeatMs = 150;
     private const float AxisDeadzone = 0.5f;
+    private const int PointerStep = 24;
+    private const int SM_CXSCREEN = 0;
+    private const int SM_CYSCREEN = 1;
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
     
     private Type _inputType;
     private Type _keyCodeType;
@@ -91,25 +104,11 @@ public sealed class UiNavigationHandler
     private int _lastAxisTick;
     private float _cachedAxisX;
     private float _cachedAxisY;
-    private bool _virtualCursorInitialized;
-    private float _virtualCursorX;
-    private float _virtualCursorY;
-    private float _lastMouseX;
-    private float _lastMouseY;
     private int _lastSelectableCacheTick;
     private List<object> _cachedSelectables;
-    private object _pendingNavigationFocus;
     private int _keyboardNavUntilTick;
     private int _keyboardFocusUntilTick;
     private bool _keyboardFocusActive;
-    private bool _ignoreMouseUntilMove;
-    private int _raycastCacheTick;
-    private Dictionary<object, (float x, float y)> _raycastScreenCache;
-    private int _candidateCacheTick;
-    private int _candidateCacheWidth;
-    private int _candidateCacheHeight;
-    private bool _candidateCacheHitAnyCollider;
-    private List<(object target, (float x, float y) screen)> _candidateCache;
 
     public void Initialize(ScreenreaderProvider screenreader)
     {
@@ -139,7 +138,6 @@ public sealed class UiNavigationHandler
             _keyboardNavUntilTick = Environment.TickCount + 500;
             _keyboardFocusUntilTick = Environment.TickCount + 1500;
             _keyboardFocusActive = true;
-            _ignoreMouseUntilMove = true;
         }
 
         if (TryAdjustFocusedSlider(direction))
@@ -166,7 +164,7 @@ public sealed class UiNavigationHandler
             ClearUiSelection();
         }
 
-        UpdateVirtualCursorFocus(direction, submitInteractPressed);
+        UpdateVirtualCursorFocus(direction, submitInteractPressed, axisX, axisY);
     }
 
     private bool TryHandleIntroSkip()
@@ -317,19 +315,10 @@ public sealed class UiNavigationHandler
         _lastEventSelected = GetInteractableGameObject(preferred) ?? preferred;
         SetInteractableFocus(preferred);
 
-        var position = GetInteractableScreenPosition(preferred);
-        if (position != null)
-        {
-            _virtualCursorX = position.Value.x;
-            _virtualCursorY = position.Value.y;
-            _virtualCursorInitialized = true;
-        }
-
         var now = Environment.TickCount;
         _keyboardNavUntilTick = now + 500;
         _keyboardFocusUntilTick = now + 1500;
         _keyboardFocusActive = true;
-        _ignoreMouseUntilMove = true;
     }
 
     private void EnsureMenuSelection()
@@ -359,19 +348,10 @@ public sealed class UiNavigationHandler
         _lastEventSelected = GetInteractableGameObject(preferred) ?? preferred;
         SetInteractableFocus(preferred);
 
-        var position = GetInteractableScreenPosition(preferred);
-        if (position != null)
-        {
-            _virtualCursorX = position.Value.x;
-            _virtualCursorY = position.Value.y;
-            _virtualCursorInitialized = true;
-        }
-
         var now = Environment.TickCount;
         _keyboardNavUntilTick = now + 500;
         _keyboardFocusUntilTick = now + 1500;
         _keyboardFocusActive = true;
-        _ignoreMouseUntilMove = true;
     }
 
     private object GetPreferredDialogSelectable()
@@ -1097,7 +1077,6 @@ public sealed class UiNavigationHandler
         _keyboardNavUntilTick = now + 500;
         _keyboardFocusUntilTick = now + 1500;
         _keyboardFocusActive = true;
-        _ignoreMouseUntilMove = true;
 
         SetInteractableFocus(interactable);
         if (TryErasePaperworkMark(interactable))
@@ -1427,7 +1406,7 @@ public sealed class UiNavigationHandler
             if (pointer == null)
                 return false;
 
-            var screen = GetMousePosition() ?? (_virtualCursorInitialized ? (_virtualCursorX, _virtualCursorY) : ((float x, float y)?)null);
+            var screen = GetMousePosition();
             if (screen == null)
                 return false;
 
@@ -1479,26 +1458,35 @@ public sealed class UiNavigationHandler
         }
     }
 
-    private void UpdateVirtualCursorFocus(NavigationDirection direction, bool submitPressed)
+    private void UpdateVirtualCursorFocus(NavigationDirection direction, bool submitPressed, float axisX, float axisY)
     {
-        UpdateVirtualCursorPosition(direction);
+        UpdatePointerFromInput(axisX, axisY);
 
         if (_lastFocusedInteractable != null && !IsInteractableActive(_lastFocusedInteractable))
         {
             ClearInteractableFocus();
         }
 
-        if (_pendingNavigationFocus != null)
+        var mousePosition = GetMousePosition();
+        if (mousePosition == null)
         {
-            var focus = _pendingNavigationFocus;
-            _pendingNavigationFocus = null;
-            SetInteractableFocus(focus);
             if (submitPressed)
+            {
                 SubmitInteractable();
+                return;
+            }
+
+            if (_keyboardFocusActive)
+                return;
+
+            if (_lastFocusedInteractable != null && !IsInteractableInstance(_lastFocusedInteractable))
+                return;
+
+            ClearInteractableFocus();
             return;
         }
 
-        var hit = GetInteractableAtScreenPosition(_virtualCursorX, _virtualCursorY);
+        var hit = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
         if (hit == null)
         {
             if (submitPressed)
@@ -1524,371 +1512,51 @@ public sealed class UiNavigationHandler
             SubmitInteractable();
     }
 
-    private void UpdateVirtualCursorPosition(NavigationDirection direction)
+    private void UpdatePointerFromInput(float axisX, float axisY)
     {
-        var allowMouse = Environment.TickCount > _keyboardNavUntilTick;
-        var mouse = allowMouse ? GetMousePosition() : null;
-        if (mouse.HasValue)
-        {
-            if (!_virtualCursorInitialized)
-            {
-                _virtualCursorX = mouse.Value.x;
-                _virtualCursorY = mouse.Value.y;
-                _virtualCursorInitialized = true;
-                _keyboardFocusActive = false;
-                _ignoreMouseUntilMove = false;
-            }
-            else if (_ignoreMouseUntilMove)
-            {
-                if (Math.Abs(mouse.Value.x - _lastMouseX) > 1f || Math.Abs(mouse.Value.y - _lastMouseY) > 1f)
-                {
-                    _virtualCursorX = mouse.Value.x;
-                    _virtualCursorY = mouse.Value.y;
-                    _keyboardFocusActive = false;
-                    _ignoreMouseUntilMove = false;
-                }
-            }
-            else if (direction == NavigationDirection.None && (Math.Abs(mouse.Value.x - _lastMouseX) > 1f || Math.Abs(mouse.Value.y - _lastMouseY) > 1f))
-            {
-                _virtualCursorX = mouse.Value.x;
-                _virtualCursorY = mouse.Value.y;
-                _keyboardFocusActive = false;
-            }
-
-            _lastMouseX = mouse.Value.x;
-            _lastMouseY = mouse.Value.y;
-        }
-
-        if (!_virtualCursorInitialized)
-        {
-            if (direction != NavigationDirection.None)
-            {
-                var origin = GetNavigationOrigin();
-                if (origin != null)
-                {
-                    _virtualCursorX = origin.Value.x;
-                    _virtualCursorY = origin.Value.y;
-                    _virtualCursorInitialized = true;
-                }
-            }
-        }
-
-        if (!_virtualCursorInitialized)
+        var movement = GetPointerMovementVector(axisX, axisY);
+        if (movement.x == 0f && movement.y == 0f)
             return;
 
-        if (direction != NavigationDirection.None)
-        {
-            var focus = TryMoveCursorToNearest(direction);
-            if (focus != null)
-                _pendingNavigationFocus = focus;
-        }
-
-        var width = GetScreenDimension("width");
-        var height = GetScreenDimension("height");
-        if (width > 0)
-            _virtualCursorX = Clamp(_virtualCursorX, 0, width - 1);
-        if (height > 0)
-            _virtualCursorY = Clamp(_virtualCursorY, 0, height - 1);
+        MoveSystemCursor(movement.x, movement.y);
+        _keyboardFocusActive = true;
     }
 
-    private object TryMoveCursorToNearest(NavigationDirection direction)
+    private void MoveSystemCursor(float dx, float dy)
     {
-        if (direction == NavigationDirection.None)
-            return null;
+        if (dx == 0f && dy == 0f)
+            return;
 
-        var origin = GetNavigationOrigin();
-        if (origin == null)
-            return null;
+        if (!GetCursorPos(out var point))
+            return;
 
-        var currentResolved = _lastFocusedInteractable != null ? ResolveInteractableForFocus(_lastFocusedInteractable) : null;
-        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-        var width = GetScreenDimension("width");
-        var height = GetScreenDimension("height");
-        if (width <= 0 || height <= 0)
-            return null;
+        var screenWidth = Math.Max(GetSystemMetrics(SM_CXSCREEN), 1);
+        var screenHeight = Math.Max(GetSystemMetrics(SM_CYSCREEN), 1);
 
-        EnsureRaycastScreenCache(width, height);
+        var targetX = point.X + (int)(dx * PointerStep);
+        var targetY = point.Y - (int)(dy * PointerStep);
+        targetX = Math.Max(0, Math.Min(targetX, screenWidth - 1));
+        targetY = Math.Max(0, Math.Min(targetY, screenHeight - 1));
 
-        var start = GetPrimaryCursorOrigin(origin.Value, width, height, useMouse: false);
-        if (!TryFindNearestInteractableInDirection(start, direction, width, height, currentResolved, seen, out var hit, out var hitScreen, out var anyCollider, out var candidateCount))
-        {
-            return null;
-        }
-
-        var resolvedHit = ResolveInteractableForFocus(hit) ?? hit;
-        if (resolvedHit == null)
-            return null;
-
-        _virtualCursorX = hitScreen.x;
-        _virtualCursorY = hitScreen.y;
-        _virtualCursorInitialized = true;
-        return resolvedHit;
+        SetCursorPos(targetX, targetY);
     }
 
-    private (float x, float y)? GetNavigationOrigin()
+    private (float x, float y) GetPointerMovementVector(float axisX, float axisY)
     {
-        if (_lastFocusedInteractable != null)
-        {
-            var resolved = ResolveInteractableForFocus(_lastFocusedInteractable);
-            var position = GetInteractableScreenPosition(resolved ?? _lastFocusedInteractable);
-            if (position != null)
-                return position;
-        }
+        var dx = 0f;
+        var dy = 0f;
 
-        var mouseHit = GetMouseHitInteractable();
-        if (mouseHit != null)
-        {
-            var resolvedMouse = ResolveInteractableForFocus(mouseHit);
-            var mousePosition = GetInteractableScreenPosition(resolvedMouse ?? mouseHit);
-            if (mousePosition != null)
-                return mousePosition;
-        }
+        if (GetKey("LeftArrow") || axisX < -AxisDeadzone)
+            dx = -1f;
+        else if (GetKey("RightArrow") || axisX > AxisDeadzone)
+            dx = 1f;
 
-        if (_keyboardFocusActive)
-        {
-            if (_virtualCursorInitialized)
-                return (_virtualCursorX, _virtualCursorY);
+        if (GetKey("UpArrow") || axisY > AxisDeadzone)
+            dy = 1f;
+        else if (GetKey("DownArrow") || axisY < -AxisDeadzone)
+            dy = -1f;
 
-            var screenWidth = GetScreenDimension("width");
-            var screenHeight = GetScreenDimension("height");
-            if (screenWidth > 0 && screenHeight > 0)
-                return (screenWidth / 2f, screenHeight / 2f);
-        }
-
-        var lastHit = GetInputManagerLastHit();
-        if (lastHit != null)
-        {
-            var resolved = ResolveInteractableForFocus(lastHit);
-            var position = GetInteractableScreenPosition(resolved ?? lastHit);
-            if (position != null)
-                return position;
-        }
-
-        if (_virtualCursorInitialized)
-            return (_virtualCursorX, _virtualCursorY);
-
-        var width = GetScreenDimension("width");
-        var height = GetScreenDimension("height");
-        if (width > 0 && height > 0)
-            return (width / 2f, height / 2f);
-
-        return null;
-    }
-
-    private static bool IsInDirection(NavigationDirection direction, float dx, float dy)
-    {
-        return direction switch
-        {
-            NavigationDirection.Up => dy > 0f,
-            NavigationDirection.Down => dy < 0f,
-            NavigationDirection.Left => dx < 0f,
-            NavigationDirection.Right => dx > 0f,
-            _ => false
-        };
-    }
-
-    private static bool IsWithinScreen((float x, float y) screen, int width, int height)
-    {
-        if (width <= 0 || height <= 0)
-            return true;
-
-        return screen.x >= 0f && screen.y >= 0f && screen.x <= width && screen.y <= height;
-    }
-
-    private bool TryFindNearestInteractableInDirection(
-        (float x, float y) origin,
-        NavigationDirection direction,
-        int width,
-        int height,
-        object currentResolved,
-        HashSet<object> seen,
-        out object hitInteractable,
-        out (float x, float y) hitScreen,
-        out bool hitAnyCollider,
-        out int candidateCount)
-    {
-        hitInteractable = null;
-        hitScreen = default;
-        hitAnyCollider = false;
-        candidateCount = 0;
-
-        var candidates = GetCandidatePositions(width, height, ref hitAnyCollider);
-        var sampleCandidates = GetRaycastSampleCandidates(width, height);
-        if (sampleCandidates.Count > 0)
-        {
-            var seenTargets = new HashSet<object>(ReferenceEqualityComparer.Instance);
-            foreach (var candidate in candidates)
-                seenTargets.Add(candidate.target);
-
-            foreach (var candidate in sampleCandidates)
-            {
-                if (candidate.target == null)
-                    continue;
-
-                if (seenTargets.Add(candidate.target))
-                    candidates.Add(candidate);
-            }
-        }
-        candidateCount = candidates.Count;
-        if (candidates.Count == 0)
-        {
-            if (TryFindSelectableNavigationTarget(direction, out var selectableTarget))
-            {
-                hitInteractable = selectableTarget;
-                hitScreen = origin;
-                return true;
-            }
-
-            if (TryFindSelectableLinear(direction, out selectableTarget))
-            {
-                hitInteractable = selectableTarget;
-                hitScreen = origin;
-                return true;
-            }
-
-            return false;
-        }
-
-        var bestDistance = float.MaxValue;
-        foreach (var candidate in candidates)
-        {
-            var resolved = ResolveInteractableForFocus(candidate.target) ?? candidate.target;
-            if (resolved == null)
-                continue;
-
-            if (currentResolved != null && ReferenceEquals(resolved, currentResolved))
-                continue;
-
-            if (!seen.Add(resolved))
-                continue;
-
-            var dx = candidate.screen.x - origin.x;
-            var dy = candidate.screen.y - origin.y;
-            if (!IsInDirection(direction, dx, dy))
-                continue;
-
-            float dist;
-            if (direction == NavigationDirection.Left || direction == NavigationDirection.Right)
-            {
-                var primary = Math.Abs(dx);
-                var secondary = Math.Abs(dy);
-                dist = (primary * primary) + (secondary * secondary * 4f);
-            }
-            else
-            {
-                var primary = Math.Abs(dy);
-                var secondary = Math.Abs(dx);
-                dist = (primary * primary) + (secondary * secondary * 4f);
-            }
-            if (dist < bestDistance)
-            {
-                bestDistance = dist;
-                hitInteractable = resolved;
-                hitScreen = candidate.screen;
-            }
-        }
-
-        if (hitInteractable != null)
-            return true;
-
-        return TryFindDirectionalScan(origin, direction, width, height, currentResolved, seen, out hitInteractable, out hitScreen);
-    }
-
-    private bool TryFindDirectionalScan(
-        (float x, float y) origin,
-        NavigationDirection direction,
-        int width,
-        int height,
-        object currentResolved,
-        HashSet<object> seen,
-        out object hitInteractable,
-        out (float x, float y) hitScreen)
-    {
-        hitInteractable = null;
-        hitScreen = default;
-
-        var maxDistance = direction switch
-        {
-            NavigationDirection.Left => origin.x,
-            NavigationDirection.Right => width - origin.x,
-            NavigationDirection.Down => origin.y,
-            NavigationDirection.Up => height - origin.y,
-            _ => 0f
-        };
-
-        if (maxDistance <= 0f)
-            return false;
-
-        const int step = 24;
-        var dir = direction switch
-        {
-            NavigationDirection.Left => (-1f, 0f),
-            NavigationDirection.Right => (1f, 0f),
-            NavigationDirection.Up => (0f, 1f),
-            NavigationDirection.Down => (0f, -1f),
-            _ => (0f, 0f)
-        };
-
-        for (var dist = step; dist <= maxDistance; dist += step)
-        {
-            var baseX = origin.x + (dir.Item1 * dist);
-            var baseY = origin.y + (dir.Item2 * dist);
-
-            if (direction == NavigationDirection.Left || direction == NavigationDirection.Right)
-            {
-                if (baseX < 0f || baseX > width)
-                    continue;
-
-                for (var y = 0f; y <= height; y += step)
-                {
-                    var hit = GetInteractableAtScreenPosition(baseX, y);
-                    if (hit == null)
-                        continue;
-
-                    var resolved = ResolveInteractableForFocus(hit) ?? hit;
-                    if (resolved == null)
-                        continue;
-
-                    if (currentResolved != null && ReferenceEquals(resolved, currentResolved))
-                        continue;
-
-                    if (!seen.Add(resolved))
-                        continue;
-
-                    hitInteractable = resolved;
-                    hitScreen = (baseX, y);
-                    return true;
-                }
-            }
-            else
-            {
-                if (baseY < 0f || baseY > height)
-                    continue;
-
-                for (var x = 0f; x <= width; x += step)
-                {
-                    var hit = GetInteractableAtScreenPosition(x, baseY);
-                    if (hit == null)
-                        continue;
-
-                    var resolved = ResolveInteractableForFocus(hit) ?? hit;
-                    if (resolved == null)
-                        continue;
-
-                    if (currentResolved != null && ReferenceEquals(resolved, currentResolved))
-                        continue;
-
-                    if (!seen.Add(resolved))
-                        continue;
-
-                    hitInteractable = resolved;
-                    hitScreen = (x, baseY);
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return (dx, dy);
     }
 
     private object GetUiRaycastGameObject()
@@ -1907,7 +1575,7 @@ public sealed class UiNavigationHandler
             if (pointer == null)
                 return null;
 
-            var screen = GetMousePosition() ?? (_virtualCursorInitialized ? (_virtualCursorX, _virtualCursorY) : ((float x, float y)?)null);
+            var screen = GetMousePosition();
             if (screen == null)
                 return null;
 
@@ -1946,113 +1614,6 @@ public sealed class UiNavigationHandler
         return null;
     }
 
-    private (float x, float y) GetPrimaryCursorOrigin((float x, float y) fallbackOrigin, int width, int height, bool useMouse)
-    {
-        if (useMouse && !_keyboardFocusActive)
-        {
-            var mouse = GetMousePosition();
-            if (mouse.HasValue)
-                return mouse.Value;
-        }
-
-        if (!_keyboardFocusActive)
-        {
-            var lastHit = GetInputManagerLastHit();
-            if (lastHit != null)
-            {
-                var position = GetInteractableScreenPosition(lastHit);
-                if (position != null)
-                    return position.Value;
-            }
-        }
-
-        if (_virtualCursorInitialized)
-            return (_virtualCursorX, _virtualCursorY);
-
-        if (width > 0 && height > 0)
-            return (width / 2f, height / 2f);
-
-        return fallbackOrigin;
-    }
-
-    private List<(object target, (float x, float y) screen)> GetCandidatePositions(int width, int height, ref bool hitAnyCollider)
-    {
-        if (IsDialogActive())
-        {
-            hitAnyCollider = false;
-            return GetDialogSelectableCandidates(width, height);
-        }
-
-        var now = Environment.TickCount;
-        if (_candidateCache != null
-            && _candidateCacheWidth == width
-            && _candidateCacheHeight == height
-            && unchecked(now - _candidateCacheTick) < 250)
-        {
-            hitAnyCollider = _candidateCacheHitAnyCollider;
-            return new List<(object target, (float x, float y) screen)>(_candidateCache);
-        }
-
-        var results = new List<(object target, (float x, float y) screen)>();
-        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-
-        foreach (var collider in FindSceneObjectsOfType(_collider2DType))
-            TryAddColliderCandidate(collider, width, height, ref hitAnyCollider, seen, results);
-
-        foreach (var collider in FindSceneObjectsOfType(_collider3DType))
-            TryAddColliderCandidate(collider, width, height, ref hitAnyCollider, seen, results);
-
-        if (IsOfficeActive())
-        {
-            foreach (var deskItem in GetDeskItemsFromGrimDesk())
-                TryAddInteractableCandidate(deskItem, width, height, seen, results);
-
-            foreach (var drawer in GetDeskDrawersFromGrimDesk())
-                TryAddInteractableCandidate(drawer, width, height, seen, results);
-
-            foreach (var deskItem in FindSceneObjectsOfType(_deskItemType))
-                TryAddInteractableCandidate(deskItem, width, height, seen, results);
-
-            var faxInstance = _faxMachineType != null ? GetStaticInstance(_faxMachineType) : null;
-            if (faxInstance != null)
-                TryAddInteractableCandidate(faxInstance, width, height, seen, results);
-
-            var spinnerInstance = _spinnerType != null ? GetStaticInstance(_spinnerType) : null;
-            if (spinnerInstance != null)
-                TryAddInteractableCandidate(spinnerInstance, width, height, seen, results);
-        }
-
-        foreach (var interactable in FindSceneObjectsOfType(_interactableType))
-            TryAddInteractableCandidate(interactable, width, height, seen, results);
-
-        foreach (var selectable in FindSceneObjectsOfType(_selectableType))
-            TryAddSelectableCandidate(selectable, width, height, seen, results);
-
-        _candidateCacheTick = now;
-        _candidateCacheWidth = width;
-        _candidateCacheHeight = height;
-        _candidateCacheHitAnyCollider = hitAnyCollider;
-        _candidateCache = results;
-
-        return new List<(object target, (float x, float y) screen)>(results);
-    }
-
-    private List<(object target, (float x, float y) screen)> GetDialogSelectableCandidates(int width, int height)
-    {
-        var results = new List<(object target, (float x, float y) screen)>();
-        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-        foreach (var selectable in GetDialogSelectables(requireScreen: true))
-            TryAddSelectableCandidate(selectable, width, height, seen, results);
-
-        if (results.Count == 0)
-        {
-            foreach (var selectable in GetDialogSelectables(requireScreen: false))
-                TryAddSelectableCandidate(selectable, width, height, seen, results);
-        }
-
-        return results;
-    }
-
     private List<object> GetSelectableListCached()
     {
         var now = Environment.TickCount;
@@ -2070,37 +1631,6 @@ public sealed class UiNavigationHandler
         }
 
         return _cachedSelectables;
-    }
-
-    private List<(object target, (float x, float y) screen)> GetRaycastSampleCandidates(int width, int height)
-    {
-        if (width <= 0 || height <= 0)
-            return new List<(object target, (float x, float y) screen)>();
-
-        const int step = 24;
-        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-        var results = new List<(object target, (float x, float y) screen)>();
-
-        for (var y = step / 2; y < height; y += step)
-        {
-            for (var x = step / 2; x < width; x += step)
-            {
-                var hit = GetInteractableAtScreenPosition(x, y);
-                if (hit == null)
-                    continue;
-
-                var resolved = ResolveInteractableForFocus(hit) ?? hit;
-                if (resolved == null)
-                    continue;
-
-                if (!seen.Add(resolved))
-                    continue;
-
-                results.Add((resolved, (x, y)));
-            }
-        }
-
-        return results;
     }
 
 
@@ -2258,96 +1788,6 @@ public sealed class UiNavigationHandler
         {
             return null;
         }
-    }
-
-    private void TryAddColliderCandidate(object collider, int width, int height, ref bool hitAnyCollider, HashSet<object> seen, List<(object target, (float x, float y) screen)> results)
-    {
-        if (collider == null || _interactableType == null)
-            return;
-
-        hitAnyCollider = true;
-
-        if (!ReflectionUtils.TryGetProperty(collider.GetType(), collider, "gameObject", out var colliderGameObject) || colliderGameObject == null)
-            return;
-
-        var getComponentInParent = colliderGameObject.GetType().GetMethod("GetComponentInParent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
-        if (getComponentInParent == null)
-            return;
-
-        var interactable = getComponentInParent.Invoke(colliderGameObject, new object[] { _interactableType });
-        if (interactable == null)
-            return;
-
-        if (!seen.Add(interactable))
-            return;
-
-        var position = GetColliderBoundsCenter(collider) ?? GetInteractableScreenPosition(interactable);
-        if (position == null)
-            return;
-
-        var screen = ToScreenPosition(position.Value, width, height);
-        if (screen == null)
-            return;
-
-        results.Add((interactable, screen.Value));
-    }
-
-    private void TryAddSelectableCandidate(object selectable, int width, int height, HashSet<object> seen, List<(object target, (float x, float y) screen)> results)
-    {
-        if (selectable == null || _selectableType == null)
-            return;
-
-        if (!seen.Add(selectable))
-            return;
-
-        if (!IsSelectableEligible(selectable, width, height, requireScreen: true))
-            return;
-
-        var gameObject = GetInteractableGameObject(selectable) ?? selectable;
-        var screen = GetUiScreenPosition(gameObject, width, height);
-        if (screen == null)
-            return;
-
-        results.Add((selectable, screen.Value));
-    }
-
-    private void TryAddInteractableCandidate(object interactable, int width, int height, HashSet<object> seen, List<(object target, (float x, float y) screen)> results)
-    {
-        if (interactable == null)
-            return;
-
-        var resolved = ResolveInteractableForFocus(interactable) ?? interactable;
-        if (resolved == null)
-            return;
-
-        var position = GetInteractableScreenPosition(resolved);
-        if (position == null && IsFaxMachine(resolved))
-        {
-            RefreshRaycastScreenCache(width, height);
-            position = GetCachedRaycastScreenPosition(resolved) ?? GetInteractableScreenPosition(resolved);
-        }
-        if (position == null)
-            return;
-
-        if (!seen.Add(resolved))
-            return;
-
-        if (!IsWithinScreen(position.Value, width, height))
-            return;
-
-        results.Add((resolved, position.Value));
-    }
-
-    private bool IsFaxMachine(object interactable)
-    {
-        return _faxMachineType != null && interactable != null && _faxMachineType.IsInstanceOfType(interactable);
-    }
-
-    private void RefreshRaycastScreenCache(int width, int height)
-    {
-        _raycastCacheTick = 0;
-        _raycastScreenCache = null;
-        EnsureRaycastScreenCache(width, height);
     }
 
     private bool IsSelectableEligible(object selectable, int width, int height, bool requireScreen)
@@ -4370,55 +3810,8 @@ public sealed class UiNavigationHandler
                 return uiFallback;
         }
 
-        var cached = GetCachedRaycastScreenPosition(interactable);
-        if (cached != null)
-            return cached;
-
         if (width > 0 && height > 0)
             return ToScreenPosition(position.Value, width, height);
-
-        return null;
-    }
-
-    private void EnsureRaycastScreenCache(int width, int height)
-    {
-        var now = Environment.TickCount;
-        if (_raycastScreenCache != null && unchecked(now - _raycastCacheTick) < 60000)
-            return;
-
-        _raycastCacheTick = now;
-        _raycastScreenCache = new Dictionary<object, (float x, float y)>(ReferenceEqualityComparer.Instance);
-
-        const int step = 24;
-        for (var y = step / 2f; y < height; y += step)
-        {
-            for (var x = step / 2f; x < width; x += step)
-            {
-                var hit = GetInteractableAtScreenPosition(x, y);
-                if (hit == null)
-                    continue;
-
-                var resolved = ResolveInteractableForFocus(hit) ?? hit;
-                if (resolved == null)
-                    continue;
-
-                if (!_raycastScreenCache.ContainsKey(resolved))
-                    _raycastScreenCache[resolved] = (x, y);
-            }
-        }
-    }
-
-    private (float x, float y)? GetCachedRaycastScreenPosition(object interactable)
-    {
-        if (_raycastScreenCache == null || interactable == null)
-            return null;
-
-        var resolved = ResolveInteractableForFocus(interactable) ?? interactable;
-        if (resolved == null)
-            return null;
-
-        if (_raycastScreenCache.TryGetValue(resolved, out var pos))
-            return pos;
 
         return null;
     }
@@ -4747,13 +4140,6 @@ public sealed class UiNavigationHandler
         _lastFocusedInteractable = interactable;
         _keyboardFocusActive = true;
         _keyboardFocusUntilTick = Environment.TickCount + 1500;
-        var focusPosition = GetInteractableScreenPosition(interactable);
-        if (focusPosition != null)
-        {
-            _virtualCursorX = focusPosition.Value.x;
-            _virtualCursorY = focusPosition.Value.y;
-            _virtualCursorInitialized = true;
-        }
         if (IsInteractableInstance(interactable))
         {
             CallInteractableMethod(interactable, "Hover");
@@ -5657,6 +5043,13 @@ public sealed class UiNavigationHandler
         }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
     private enum NavigationDirection
     {
         None,
@@ -5664,15 +5057,6 @@ public sealed class UiNavigationHandler
         Down,
         Left,
         Right
-    }
-
-    private sealed class ReferenceEqualityComparer : IEqualityComparer<object>
-    {
-        public static readonly ReferenceEqualityComparer Instance = new();
-
-        bool IEqualityComparer<object>.Equals(object x, object y) => ReferenceEquals(x, y);
-
-        public int GetHashCode(object obj) => obj == null ? 0 : RuntimeHelpers.GetHashCode(obj);
     }
 
 }
