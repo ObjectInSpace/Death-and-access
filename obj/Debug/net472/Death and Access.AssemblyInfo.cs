@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Death and Access")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fd1e1d994bb57b1cf144b447cd19e1fb41bbde05")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f88fb500de931c53cf8a9127ec8f663ac80fe0e9")]
 [assembly: System.Reflection.AssemblyProductAttribute("Death and Access")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Death and Access")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
