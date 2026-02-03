@@ -111,8 +111,32 @@ public sealed class UiNavigationHandler
     private bool _candidateCacheHitAnyCollider;
     private List<(object target, (float x, float y) screen)> _candidateCache;
 
+    internal static UiNavigationHandler Instance { get; private set; }
+
+    internal static void ClearInstance()
+    {
+        Instance = null;
+    }
+
+    internal bool IsVirtualCursorActive => _virtualCursorInitialized && _keyboardFocusActive;
+
+    internal bool TryGetVirtualCursorPosition(out float x, out float y)
+    {
+        if (!IsVirtualCursorActive)
+        {
+            x = 0f;
+            y = 0f;
+            return false;
+        }
+
+        x = _virtualCursorX;
+        y = _virtualCursorY;
+        return true;
+    }
+
     public void Initialize(ScreenreaderProvider screenreader)
     {
+        Instance = this;
         _screenreader = screenreader;
     }
 
