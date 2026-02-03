@@ -1028,6 +1028,16 @@ public class SpecificTextAnnouncer
             return;
 
         AnnounceTextComponents(current, null, force: true);
+        AnnounceHoveredObjectName(current);
+    }
+
+    private void AnnounceHoveredObjectName(object hovered)
+    {
+        var name = GetComponentOrParentName(hovered);
+        if (string.IsNullOrWhiteSpace(name))
+            return;
+
+        AnnounceContent(name, priority: false);
     }
 
     private void AnnounceCurrentHover()
