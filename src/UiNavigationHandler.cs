@@ -4,7 +4,6 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using MelonLoader;
 
 public sealed class UiNavigationHandler
 {
@@ -76,7 +75,6 @@ public sealed class UiNavigationHandler
     private Type _demoEndScreenType;
     private Type _comicManagerType;
     private Type _unityObjectType;
-    private Type _inputSystemMouseType;
     private Type _gameObjectType;
     private Type _transformType;
     private Type _canvasScalerType;
@@ -91,10 +89,6 @@ public sealed class UiNavigationHandler
     private MethodInfo _getKeyDownMethod;
     private MethodInfo _getKeyMethod;
     private MethodInfo _getAxisRawMethod;
-    private MethodInfo _setMousePositionMethod;
-    private bool _setMousePositionUsesVector3;
-    private PropertyInfo _inputSystemMouseCurrentProp;
-    private MethodInfo _inputSystemMouseWarpMethod;
     private MethodInfo _findObjectsOfTypeMethod;
     private object _virtualCursorCanvas;
     private object _virtualCursorImage;
@@ -105,10 +99,8 @@ public sealed class UiNavigationHandler
     private float _virtualCursorTextureHeight;
     private (float x, float y)? _lastRawMousePos;
     private bool _virtualCursorUsesFallback;
-    private int _nextArrowLogTick;
     private bool _cursorHiddenForVirtual;
     private (float x, float y)? _pendingShortcutScreenPos;
-    private int _nextShortcutLogTick;
     private int _nextKeyTick;
     private bool _axisUpHeld;
     private bool _axisDownHeld;
@@ -197,8 +189,6 @@ public sealed class UiNavigationHandler
 
         if (TryAdjustFocusedSlider(direction))
             return;
-
-        LogPaperworkShortcutState();
 
         if (IsMenuActive() && !IsOfficeActive() && direction != NavigationDirection.None)
         {
@@ -873,38 +863,6 @@ public sealed class UiNavigationHandler
         }
     }
 
-    private bool TryFindSelectableLinear(NavigationDirection direction, out object selectable)
-    {
-        selectable = null;
-        var strictCandidates = GetEligibleSelectables(requireScreen: true);
-        var list = strictCandidates.Count > 0 ? strictCandidates : GetEligibleSelectables(requireScreen: false);
-        if (list.Count == 0)
-            return false;
-
-        var current = GetCurrentSelectedGameObject();
-        var currentSelectable = current != null ? GetComponentByType(current, _selectableType) : null;
-
-        var ordered = new List<object>(list.Count);
-        ordered.AddRange(list);
-        ordered.Sort((left, right) =>
-        {
-            var leftGo = GetInteractableGameObject(left);
-            var rightGo = GetInteractableGameObject(right);
-            var leftKey = leftGo != null ? GetHierarchyOrderKey(leftGo) : null;
-            var rightKey = rightGo != null ? GetHierarchyOrderKey(rightGo) : null;
-            return string.Compare(leftKey ?? string.Empty, rightKey ?? string.Empty, StringComparison.Ordinal);
-        });
-
-        var index = currentSelectable != null ? ordered.IndexOf(currentSelectable) : 0;
-        if (index < 0)
-            index = 0;
-
-        var forward = direction == NavigationDirection.Down || direction == NavigationDirection.Right;
-        index = forward ? (index + 1) % ordered.Count : (index - 1 + ordered.Count) % ordered.Count;
-        selectable = ordered[index];
-        return selectable != null;
-    }
-
     private bool AnnounceMoney()
     {
         if (_hudManagerType == null)
@@ -933,28 +891,18 @@ public sealed class UiNavigationHandler
         {
             if (GetKeyDown("Alpha" + i))
             {
-                MelonLoader.MelonLogger.Msg($"Paperwork shortcut keydown {i}.");
                 if (!TrySetPaperworkShortcutScreenPos(i - 1))
                     return false;
                 var paperwork = GetPaperworkByIndex(i - 1);
-                if (paperwork == null)
-                    MelonLoader.MelonLogger.Msg($"Paperwork shortcut {i}: no paperwork at index.");
-                else
-                    MelonLoader.MelonLogger.Msg($"Paperwork shortcut {i}: found {paperwork.GetType().Name}.");
                 return ActivateInteractableWithFocus(paperwork);
             }
         }
 
         if (GetKeyDown("Alpha0"))
         {
-            MelonLoader.MelonLogger.Msg("Paperwork shortcut keydown 0.");
             if (!TrySetPaperworkShortcutScreenPos(9))
                 return false;
             var paperwork = GetPaperworkByIndex(9);
-            if (paperwork == null)
-                MelonLoader.MelonLogger.Msg("Paperwork shortcut 0: no paperwork at index.");
-            else
-                MelonLoader.MelonLogger.Msg($"Paperwork shortcut 0: found {paperwork.GetType().Name}.");
             return ActivateInteractableWithFocus(paperwork);
         }
 
@@ -984,13 +932,10 @@ public sealed class UiNavigationHandler
             var value = Enum.Parse(enumType, side, ignoreCase: true);
             var drawer = GetDrawerByType(value) ?? GetGrimDeskDrawerByField(value);
             if (drawer == null)
-                MelonLoader.MelonLogger.Msg($"Drawer shortcut {side}: drawer instance not found.");
-            if (drawer == null)
                 return false;
 
             if (!TrySetDrawerShortcutScreenPos(drawer))
             {
-                MelonLoader.MelonLogger.Msg($"Drawer shortcut {side}: no screen pos.");
                 return false;
             }
             return ActivateInteractableWithFocus(drawer);
@@ -999,6 +944,41 @@ public sealed class UiNavigationHandler
         {
             return false;
         }
+    }
+
+    private bool TryFindSelectableLinear(NavigationDirection direction, out object selectable)
+    {
+        selectable = null;
+        if (_selectableType == null)
+            return false;
+
+        var strictCandidates = GetEligibleSelectables(requireScreen: true);
+        var list = strictCandidates.Count > 0 ? strictCandidates : GetEligibleSelectables(requireScreen: false);
+        if (list.Count == 0)
+            return false;
+
+        var current = GetCurrentSelectedGameObject();
+        var currentSelectable = current != null ? GetComponentByType(current, _selectableType) : null;
+
+        var ordered = new List<object>(list.Count);
+        ordered.AddRange(list);
+        ordered.Sort((left, right) =>
+        {
+            var leftGo = GetInteractableGameObject(left);
+            var rightGo = GetInteractableGameObject(right);
+            var leftKey = leftGo != null ? GetHierarchyOrderKey(leftGo) : null;
+            var rightKey = rightGo != null ? GetHierarchyOrderKey(rightGo) : null;
+            return string.Compare(leftKey ?? string.Empty, rightKey ?? string.Empty, StringComparison.Ordinal);
+        });
+
+        var index = currentSelectable != null ? ordered.IndexOf(currentSelectable) : 0;
+        if (index < 0)
+            index = 0;
+
+        var forward = direction == NavigationDirection.Down || direction == NavigationDirection.Right;
+        index = forward ? (index + 1) % ordered.Count : (index - 1 + ordered.Count) % ordered.Count;
+        selectable = ordered[index];
+        return selectable != null;
     }
 
     private bool ActivatePiggyBank()
@@ -1162,10 +1142,7 @@ public sealed class UiNavigationHandler
             return false;
 
         if (!TryMoveCursorToInteractable(interactable))
-        {
-            MelonLoader.MelonLogger.Msg($"Shortcut move failed: {interactable.GetType().Name}");
             return false;
-        }
 
         var now = Environment.TickCount;
         _keyboardNavUntilTick = now + 500;
@@ -1189,10 +1166,7 @@ public sealed class UiNavigationHandler
         var screen = _pendingShortcutScreenPos ?? GetInteractableScreenPosition(interactable);
         _pendingShortcutScreenPos = null;
         if (screen == null)
-        {
-            MelonLoader.MelonLogger.Msg($"No screen position for: {interactable.GetType().Name}");
             return false;
-        }
 
         _virtualCursorPos = screen.Value;
         _virtualCursorActive = true;
@@ -1207,10 +1181,7 @@ public sealed class UiNavigationHandler
     {
         var pos = GetPaperworkShortcutScreenPos(index);
         if (pos == null)
-        {
-            MelonLoader.MelonLogger.Msg($"Paperwork shortcut {index + 1}: no screen pos from marker.");
             return false;
-        }
 
         _pendingShortcutScreenPos = pos;
         return true;
@@ -1219,31 +1190,19 @@ public sealed class UiNavigationHandler
     private (float x, float y)? GetPaperworkShortcutScreenPos(int index)
     {
         if (_grimDeskType == null || index < 0)
-        {
-            MelonLoader.MelonLogger.Msg("Paperwork shortcut: GrimDesk type missing or index < 0.");
             return null;
-        }
 
         var desk = GetStaticInstance(_grimDeskType);
         if (desk == null)
-        {
-            MelonLoader.MelonLogger.Msg("Paperwork shortcut: GrimDesk instance missing.");
             return null;
-        }
 
         var marker = GetMemberValue(desk, "PaperWorkSpawnMarker");
         if (marker == null)
-        {
-            MelonLoader.MelonLogger.Msg("Paperwork shortcut: PaperWorkSpawnMarker missing.");
             return null;
-        }
 
         var markerPos = GetTransformPosition3(marker);
         if (markerPos == null)
-        {
-            MelonLoader.MelonLogger.Msg("Paperwork shortcut: marker position missing.");
             return null;
-        }
 
         var offsetX = 1.0f * (index % 4);
         var offsetY = 0.3f * (index % 4) - 0.6f * (float)Math.Floor(index / 4.0);
@@ -1256,10 +1215,7 @@ public sealed class UiNavigationHandler
 
         var width = GetScreenDimension("width");
         var height = GetScreenDimension("height");
-        var fallback = ToScreenPosition((world.x, world.y), width, height);
-        if (fallback == null)
-            MelonLoader.MelonLogger.Msg($"Paperwork shortcut: fallback failed. width={width}, height={height}");
-        return fallback;
+        return ToScreenPosition((world.x, world.y), width, height);
     }
 
     private bool TrySetDrawerShortcutScreenPos(object drawer)
@@ -1294,9 +1250,8 @@ public sealed class UiNavigationHandler
         var height = GetScreenDimension("height");
         if (width > 0 && height > 0)
         {
-            var fallbackX = string.Equals(drawer.GetType().GetProperty("Type")?.GetValue(drawer)?.ToString(), "Left", StringComparison.OrdinalIgnoreCase)
-                ? width * 0.25f
-                : width * 0.75f;
+            var isLeft = string.Equals(drawer.GetType().GetProperty("Type")?.GetValue(drawer)?.ToString(), "Left", StringComparison.OrdinalIgnoreCase);
+            var fallbackX = isLeft ? width * 0.25f : width * 0.75f;
             var fallbackY = height * 0.5f;
             _pendingShortcutScreenPos = (fallbackX, fallbackY);
             return true;
@@ -1593,7 +1548,6 @@ public sealed class UiNavigationHandler
         _demoEndScreenType ??= TypeResolver.Get("DemoEndScreen");
         _comicManagerType ??= TypeResolver.Get("ComicManager");
         _unityObjectType ??= TypeResolver.Get("UnityEngine.Object");
-        _inputSystemMouseType ??= TypeResolver.Get("UnityEngine.InputSystem.Mouse");
         _gameObjectType ??= TypeResolver.Get("UnityEngine.GameObject");
         _transformType ??= TypeResolver.Get("UnityEngine.Transform");
         _canvasScalerType ??= TypeResolver.Get("UnityEngine.UI.CanvasScaler");
@@ -1614,17 +1568,7 @@ public sealed class UiNavigationHandler
         _getRayIntersectionMethod ??= _physics2DType?.GetMethod("GetRayIntersection", BindingFlags.Public | BindingFlags.Static, null, new[] { TypeResolver.Get("UnityEngine.Ray"), typeof(float) }, null)
             ?? _physics2DType?.GetMethod("GetRayIntersection", BindingFlags.Public | BindingFlags.Static);
         _getMousePositionMethod ??= _inputType?.GetProperty("mousePosition", BindingFlags.Public | BindingFlags.Static)?.GetGetMethod();
-        CacheInputSystemMethods();
         CacheInputMethods();
-    }
-
-    private void CacheInputSystemMethods()
-    {
-        if (_inputSystemMouseType == null)
-            return;
-
-        _inputSystemMouseCurrentProp ??= _inputSystemMouseType.GetProperty("current", BindingFlags.Public | BindingFlags.Static);
-        _inputSystemMouseWarpMethod ??= _inputSystemMouseType.GetMethod("WarpCursorPosition", BindingFlags.Public | BindingFlags.Instance);
     }
 
     private void CacheInputMethods()
@@ -1635,47 +1579,7 @@ public sealed class UiNavigationHandler
         _getKeyDownMethod ??= _inputType.GetMethod("GetKeyDown", BindingFlags.Public | BindingFlags.Static, null, new[] { _keyCodeType }, null);
         _getKeyMethod ??= _inputType.GetMethod("GetKey", BindingFlags.Public | BindingFlags.Static, null, new[] { _keyCodeType }, null);
         _getAxisRawMethod ??= _inputType.GetMethod("GetAxisRaw", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null);
-        CacheLegacyMouseWarp();
 
-    }
-
-    private void CacheLegacyMouseWarp()
-    {
-        if (_inputType == null)
-            return;
-
-        if (_setMousePositionMethod != null)
-            return;
-
-        if (_vector3Type != null)
-        {
-            _setMousePositionMethod = _inputType.GetMethod(
-                "SetMousePosition",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
-                null,
-                new[] { _vector3Type },
-                null);
-            if (_setMousePositionMethod != null)
-            {
-                _setMousePositionUsesVector3 = true;
-                return;
-            }
-        }
-
-        if (_vector2Type != null)
-        {
-            _setMousePositionMethod = _inputType.GetMethod(
-                "SetMousePosition",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
-                null,
-                new[] { _vector2Type },
-                null);
-            if (_setMousePositionMethod != null)
-            {
-                _setMousePositionUsesVector3 = false;
-                return;
-            }
-        }
     }
 
     private bool IsSceneChanging()
@@ -1753,10 +1657,8 @@ public sealed class UiNavigationHandler
         _virtualCursorTextureHeight = 0f;
         _lastRawMousePos = null;
         _virtualCursorUsesFallback = false;
-        _nextArrowLogTick = 0;
         _cursorHiddenForVirtual = false;
         _pendingShortcutScreenPos = null;
-        _nextShortcutLogTick = 0;
         VirtualMouseState.Reset();
         SetVirtualCursorOverlayVisible(false);
     }
@@ -1923,9 +1825,6 @@ public sealed class UiNavigationHandler
             || axisX < -AxisDeadzone || axisX > AxisDeadzone
             || axisY < -AxisDeadzone || axisY > AxisDeadzone;
 
-        if (sawArrowInput)
-            LogArrowInput(left, right, up, down, axisX, axisY);
-
         var movement = GetPointerMovementVector(axisX, axisY);
         if (movement.x == 0f && movement.y == 0f && direction != NavigationDirection.None)
         {
@@ -1963,36 +1862,6 @@ public sealed class UiNavigationHandler
         _virtualCursorActive = true;
         EnsureVirtualCursorOverlay();
         UpdateVirtualCursorOverlayPosition(_virtualCursorPos.x, _virtualCursorPos.y);
-    }
-
-    private void LogArrowInput(bool left, bool right, bool up, bool down, float axisX, float axisY)
-    {
-        var now = Environment.TickCount;
-        if (now < _nextArrowLogTick)
-            return;
-
-        _nextArrowLogTick = now + 1000;
-        MelonLogger.Msg($"Arrow input: keys(L/R/U/D)=({left},{right},{up},{down}), axis=({axisX:0.00},{axisY:0.00}), virtualActive={_virtualCursorActive}");
-    }
-
-    private void LogPaperworkShortcutState()
-    {
-        var now = Environment.TickCount;
-        if (now < _nextShortcutLogTick)
-            return;
-
-        if (!IsOfficeActive())
-            return;
-
-        var anyDown = GetKeyDown("Alpha1") || GetKeyDown("Alpha2") || GetKeyDown("Alpha3") || GetKeyDown("Alpha4")
-                      || GetKeyDown("Alpha5") || GetKeyDown("Alpha6") || GetKeyDown("Alpha7") || GetKeyDown("Alpha8")
-                      || GetKeyDown("Alpha9") || GetKeyDown("Alpha0");
-
-        if (!anyDown)
-            return;
-
-        _nextShortcutLogTick = now + 1000;
-        MelonLogger.Msg("Paperwork shortcut keydown detected (1-0).");
     }
 
     private void SyncVirtualCursorToRawMouse()
@@ -2505,70 +2374,6 @@ public sealed class UiNavigationHandler
         }
     }
 
-    private void TryWarpCursor(float x, float y)
-    {
-        if (_vector2Type == null)
-            return;
-
-        if (_inputSystemMouseType == null)
-            _inputSystemMouseType = TypeResolver.Get("UnityEngine.InputSystem.Mouse");
-
-        if (_inputSystemMouseCurrentProp == null || _inputSystemMouseWarpMethod == null)
-            CacheInputSystemMethods();
-
-        if (_inputSystemMouseCurrentProp != null && _inputSystemMouseWarpMethod != null)
-        {
-            try
-            {
-                var mouse = _inputSystemMouseCurrentProp.GetValue(null);
-                if (mouse != null)
-                {
-                    var ctor = _vector2Type.GetConstructor(new[] { typeof(float), typeof(float) });
-                    if (ctor != null)
-                    {
-                        var vector = ctor.Invoke(new object[] { x, y });
-                        _inputSystemMouseWarpMethod.Invoke(mouse, new[] { vector });
-                        return;
-                    }
-                }
-            }
-            catch
-            {
-                // Ignore warp failures; fall back to legacy input if available.
-            }
-        }
-
-        CacheLegacyMouseWarp();
-        if (_setMousePositionMethod == null)
-            return;
-
-        try
-        {
-            if (_setMousePositionUsesVector3 && _vector3Type != null)
-            {
-                var ctor3 = _vector3Type.GetConstructor(new[] { typeof(float), typeof(float), typeof(float) });
-                if (ctor3 == null)
-                    return;
-
-                var vector3 = ctor3.Invoke(new object[] { x, y, 0f });
-                _setMousePositionMethod.Invoke(null, new[] { vector3 });
-            }
-            else
-            {
-                var ctor2 = _vector2Type.GetConstructor(new[] { typeof(float), typeof(float) });
-                if (ctor2 == null)
-                    return;
-
-                var vector2 = ctor2.Invoke(new object[] { x, y });
-                _setMousePositionMethod.Invoke(null, new[] { vector2 });
-            }
-        }
-        catch
-        {
-            // Ignore warp failures; virtual cursor still works for hit tests.
-        }
-    }
-
     private (float x, float y) GetPointerMovementVector(float axisX, float axisY)
     {
         var dx = 0f;
@@ -3050,24 +2855,27 @@ public sealed class UiNavigationHandler
 
     private (float x, float y)? ToScreenPosition((float x, float y) position, int width, int height)
     {
-        var screen = WorldToScreenPoint(position);
-        if (screen != null)
-            return screen;
-
-        if (width > 0 && height > 0)
-        {
-            if (position.x >= 0 && position.y >= 0 && position.x <= width && position.y <= height)
-                return position;
-
-            var fallbackX = Clamp(position.x, 0f, width - 1);
-            var fallbackY = Clamp(position.y, 0f, height - 1);
-            return (fallbackX, fallbackY);
-        }
+        if (width <= 0 || height <= 0)
+            return null;
 
         if (position.x >= 0 && position.y >= 0 && position.x <= width && position.y <= height)
             return position;
 
-        return null;
+        var fallbackX = Clamp(position.x, 0f, width - 1);
+        var fallbackY = Clamp(position.y, 0f, height - 1);
+        return (fallbackX, fallbackY);
+    }
+
+    private (float x, float y)? TryProjectScreenPosition((float x, float y, float z) world)
+    {
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+
+        var screen = WorldToScreenPoint(world) ?? WorldToScreenPointWithCamera(world);
+        if (screen != null)
+            return screen;
+
+        return ToScreenPosition((world.x, world.y), width, height);
     }
 
     private (float x, float y)? GetUiScreenPosition(object gameObject, int width, int height)
@@ -4302,6 +4110,8 @@ public sealed class UiNavigationHandler
                 SetInteractableFocus(fallback);
                 return true;
             }
+
+            return false;
         }
         catch
         {
@@ -4579,9 +4389,28 @@ public sealed class UiNavigationHandler
         if (slider == null)
             return false;
 
-        var min = GetFloatMember(slider, "minValue", 0f);
-        var max = GetFloatMember(slider, "maxValue", 1f);
-        var value = GetFloatMember(slider, "value", min);
+        var min = 0f;
+        var max = 1f;
+        var value = 0f;
+        var minObj = GetMemberValue(slider, "minValue");
+        if (minObj is float minF) min = minF;
+        else if (minObj is double minD) min = (float)minD;
+        else if (minObj is int minI) min = minI;
+        else if (minObj is long minL) min = minL;
+        else if (minObj is decimal minM) min = (float)minM;
+        var maxObj = GetMemberValue(slider, "maxValue");
+        if (maxObj is float maxF) max = maxF;
+        else if (maxObj is double maxD) max = (float)maxD;
+        else if (maxObj is int maxI) max = maxI;
+        else if (maxObj is long maxL) max = maxL;
+        else if (maxObj is decimal maxM) max = (float)maxM;
+        var valueObj = GetMemberValue(slider, "value");
+        if (valueObj is float valueF) value = valueF;
+        else if (valueObj is double valueD) value = (float)valueD;
+        else if (valueObj is int valueI) value = valueI;
+        else if (valueObj is long valueL) value = valueL;
+        else if (valueObj is decimal valueM) value = (float)valueM;
+        else value = min;
         var step = (max - min) * 0.05f;
         if (step <= 0f)
             step = 0.05f;
@@ -4589,7 +4418,8 @@ public sealed class UiNavigationHandler
         value += direction == NavigationDirection.Right ? step : -step;
         value = Clamp(value, Math.Min(min, max), Math.Max(min, max));
 
-        if (GetBoolMember(slider, "wholeNumbers", false))
+        var wholeNumbersObj = GetMemberValue(slider, "wholeNumbers");
+        if (wholeNumbersObj is bool wholeNumbers && wholeNumbers)
             value = (float)Math.Round(value);
 
         return SetFloatMember(slider, "value", value);
@@ -4616,9 +4446,28 @@ public sealed class UiNavigationHandler
         if (slider == null)
             return false;
 
-        var min = GetFloatMember(slider, "minValue", 0f);
-        var max = GetFloatMember(slider, "maxValue", 1f);
-        var value = GetFloatMember(slider, "value", min);
+        var min = 0f;
+        var max = 1f;
+        var value = 0f;
+        var minObj = GetMemberValue(slider, "minValue");
+        if (minObj is float minF) min = minF;
+        else if (minObj is double minD) min = (float)minD;
+        else if (minObj is int minI) min = minI;
+        else if (minObj is long minL) min = minL;
+        else if (minObj is decimal minM) min = (float)minM;
+        var maxObj = GetMemberValue(slider, "maxValue");
+        if (maxObj is float maxF) max = maxF;
+        else if (maxObj is double maxD) max = (float)maxD;
+        else if (maxObj is int maxI) max = maxI;
+        else if (maxObj is long maxL) max = maxL;
+        else if (maxObj is decimal maxM) max = (float)maxM;
+        var valueObj = GetMemberValue(slider, "value");
+        if (valueObj is float valueF) value = valueF;
+        else if (valueObj is double valueD) value = (float)valueD;
+        else if (valueObj is int valueI) value = valueI;
+        else if (valueObj is long valueL) value = valueL;
+        else if (valueObj is decimal valueM) value = (float)valueM;
+        else value = min;
         var step = (max - min) * 0.05f;
         if (step <= 0f)
             step = 0.05f;
@@ -4626,7 +4475,8 @@ public sealed class UiNavigationHandler
         value += direction == NavigationDirection.Right ? step : -step;
         value = Clamp(value, Math.Min(min, max), Math.Max(min, max));
 
-        if (GetBoolMember(slider, "wholeNumbers", false))
+        var wholeNumbersObj = GetMemberValue(slider, "wholeNumbers");
+        if (wholeNumbersObj is bool wholeNumbers && wholeNumbers)
             value = (float)Math.Round(value);
 
         if (!SetFloatMember(slider, "value", value))
@@ -4953,48 +4803,24 @@ public sealed class UiNavigationHandler
 
     private (float x, float y)? GetInteractableScreenPosition(object interactable)
     {
-        var isPaperwork = IsPaperwork(interactable);
-        if (interactable != null)
-            MelonLoader.MelonLogger.Msg($"ScreenPos target={interactable.GetType().Name}, isPaperwork={isPaperwork}");
-
-        if (isPaperwork)
+        if (IsPaperwork(interactable))
         {
             var paperCollider = GetMemberValue(interactable, "ColliderPaperwork");
             var paperCenter = GetColliderBoundsCenter(paperCollider);
             if (paperCenter != null)
             {
-                var paperScreen = WorldToScreenPoint(paperCenter.Value);
-                if (paperScreen != null)
-                    return paperScreen;
-                var fallbackScreen = WorldToScreenPointWithCamera((paperCenter.Value.x, paperCenter.Value.y, 0f));
-                if (fallbackScreen != null)
-                    return fallbackScreen;
-                return ToScreenPosition(paperCenter.Value, GetScreenDimension("width"), GetScreenDimension("height"));
+                var projected = TryProjectScreenPosition((paperCenter.Value.x, paperCenter.Value.y, 0f));
+                if (projected != null)
+                    return projected;
             }
 
             var paperGo = GetInteractableGameObject(interactable);
-            var paperBounds = paperGo != null ? GetColliderBoundsCenterFromGameObject(paperGo) : null;
-            if (paperBounds != null)
-            {
-                var paperBoundsScreen = WorldToScreenPoint(paperBounds.Value);
-                if (paperBoundsScreen != null)
-                    return paperBoundsScreen;
-                var fallbackScreen = WorldToScreenPointWithCamera((paperBounds.Value.x, paperBounds.Value.y, 0f));
-                if (fallbackScreen != null)
-                    return fallbackScreen;
-                return ToScreenPosition(paperBounds.Value, GetScreenDimension("width"), GetScreenDimension("height"));
-            }
-
-            var paperPos = paperGo != null ? GetTransformPosition(paperGo) : null;
+            var paperPos = paperGo != null ? GetTransformPosition3(paperGo) : null;
             if (paperPos != null)
             {
-                var paperPosScreen = WorldToScreenPoint(paperPos.Value);
-                if (paperPosScreen != null)
-                    return paperPosScreen;
-                var fallbackScreen = WorldToScreenPointWithCamera((paperPos.Value.x, paperPos.Value.y, 0f));
-                if (fallbackScreen != null)
-                    return fallbackScreen;
-                return ToScreenPosition(paperPos.Value, GetScreenDimension("width"), GetScreenDimension("height"));
+                var projected = TryProjectScreenPosition(paperPos.Value);
+                if (projected != null)
+                    return projected;
             }
 
             foreach (var fieldName in new[] { "PositionDesktop", "OriginPosition", "PositionFocus" })
@@ -5003,22 +4829,11 @@ public sealed class UiNavigationHandler
                 var vector3 = GetVector3FromValue(fieldValue);
                 if (vector3 != null)
                 {
-                    var vector3Screen = WorldToScreenPoint(vector3.Value);
-                    if (vector3Screen != null)
-                        return vector3Screen;
-                    var fallbackScreen = WorldToScreenPointWithCamera((vector3.Value.x, vector3.Value.y, vector3.Value.z));
-                    if (fallbackScreen != null)
-                        return fallbackScreen;
-                    var vector2Fallback = (vector3.Value.x, vector3.Value.y);
-                    return ToScreenPosition(vector2Fallback, GetScreenDimension("width"), GetScreenDimension("height"));
+                    var projected = TryProjectScreenPosition(vector3.Value);
+                    if (projected != null)
+                        return projected;
                 }
             }
-
-            MelonLoader.MelonLogger.Msg($"Paperwork screen position failed: collider={(paperCollider != null)}, center={(paperCenter != null)}, go={(paperGo != null)}, bounds={(paperBounds != null)}, pos={(paperPos != null)}");
-        }
-        else if (interactable != null && string.Equals(interactable.GetType().Name, "Paperwork", StringComparison.Ordinal))
-        {
-            MelonLoader.MelonLogger.Msg($"Paperwork not recognized. _paperworkType null={_paperworkType == null}, isInstance={(_paperworkType != null && _paperworkType.IsInstanceOfType(interactable))}");
         }
 
         var gameObject = GetInteractableGameObject(interactable);
@@ -5030,35 +4845,23 @@ public sealed class UiNavigationHandler
             if (uiScreen != null)
                 return uiScreen;
         }
+
         var position3 = gameObject != null ? GetTransformPosition3(gameObject) : null;
         if (position3 == null)
             position3 = GetTransformPosition3(interactable);
         if (position3 != null)
         {
-            var screen3 = WorldToScreenPoint(position3.Value);
-            if (screen3 != null)
-                return screen3;
+            var projected = TryProjectScreenPosition(position3.Value);
+            if (projected != null)
+                return projected;
         }
 
         var position = gameObject != null ? GetTransformPosition(gameObject) : null;
-
         if (position == null)
             position = GetTransformPosition(interactable);
 
-        if (position == null && IsDeskItem(interactable))
-            position = GetDeskItemStatusPosition(interactable, gameObject);
-
-        if (position == null)
-            position = GetDeskItemOriginPosition(interactable);
-
         if (position == null && IsDrawer(interactable))
             position = GetDrawerPosition(interactable);
-
-        if (position == null && gameObject != null)
-            position = GetColliderBoundsCenterFromGameObject(gameObject);
-
-        if (position == null && gameObject != null)
-            position = GetRendererBoundsCenterFromGameObject(gameObject);
 
         if (position == null && IsDrawer(interactable))
         {
@@ -5069,18 +4872,11 @@ public sealed class UiNavigationHandler
         }
 
         if (position == null)
-        {
-            if (IsDrawer(interactable))
-                MelonLoader.MelonLogger.Msg("Drawer screen position failed.");
             return null;
-        }
 
-        var screen = WorldToScreenPoint(position.Value);
-        if (screen != null)
-            return screen;
-        var instanceScreen = WorldToScreenPointWithCamera((position.Value.x, position.Value.y, 0f));
-        if (instanceScreen != null)
-            return instanceScreen;
+        var projected2d = TryProjectScreenPosition((position.Value.x, position.Value.y, 0f));
+        if (projected2d != null)
+            return projected2d;
 
         if (gameObject != null)
         {
@@ -5109,63 +4905,6 @@ public sealed class UiNavigationHandler
         return GetTransformPosition(gameObject);
     }
 
-    private (float x, float y)? GetDeskItemStatusPosition(object interactable, object gameObject)
-    {
-        if (_deskItemType == null || interactable == null || !_deskItemType.IsInstanceOfType(interactable))
-            return null;
-
-        try
-        {
-            var statusField = _deskItemType.GetField("ItemStatus", BindingFlags.Instance | BindingFlags.Public);
-            var status = statusField?.GetValue(interactable);
-            if (status == null)
-                return null;
-
-            var posField = status.GetType().GetField("Position", BindingFlags.Instance | BindingFlags.Public);
-            var posValue = posField?.GetValue(status);
-            var local = GetVector2FromValue(posValue);
-            if (local == null)
-                return null;
-
-            var transform = gameObject != null ? GetTransform(gameObject) : null;
-            if (transform != null && _vector3Type != null)
-            {
-                var method = transform.GetType().GetMethod("TransformPoint", BindingFlags.Instance | BindingFlags.Public, null, new[] { _vector3Type }, null);
-                if (method != null)
-                {
-                    var ctor = _vector3Type.GetConstructor(new[] { typeof(float), typeof(float), typeof(float) });
-                    var vector = ctor?.Invoke(new object[] { local.Value.x, local.Value.y, 0f });
-                    var world = method.Invoke(transform, new[] { vector });
-                    var worldPos = GetVector2FromValue(world);
-                    if (worldPos != null)
-                        return worldPos;
-                }
-            }
-
-            return local;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private (float x, float y)? GetDeskItemOriginPosition(object interactable)
-    {
-        if (_deskItemType == null || interactable == null || !_deskItemType.IsInstanceOfType(interactable))
-            return null;
-
-        try
-        {
-            var field = _deskItemType.GetField("OriginPosition", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            var value = field?.GetValue(interactable);
-            return GetVector2FromValue(value);
-        }
-        catch
-        {
-            return null;
-        }
-    }
 
     private (float x, float y)? GetColliderBoundsCenterFromGameObject(object gameObject)
     {
@@ -6208,26 +5947,6 @@ public sealed class UiNavigationHandler
         {
             return null;
         }
-    }
-
-    private static float GetFloatMember(object instance, string name, float fallback)
-    {
-        var value = GetMemberValue(instance, name);
-        return value switch
-        {
-            float f => f,
-            double d => (float)d,
-            int i => i,
-            long l => l,
-            decimal m => (float)m,
-            _ => fallback
-        };
-    }
-
-    private static bool GetBoolMember(object instance, string name, bool fallback)
-    {
-        var value = GetMemberValue(instance, name);
-        return value is bool flag ? flag : fallback;
     }
 
     private static bool SetFloatMember(object instance, string name, float value)
