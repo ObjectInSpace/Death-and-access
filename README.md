@@ -7,8 +7,8 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 - Drag-and-drop: press space to pick up the item under the cursor, arrow keys to move it, and space again to put it down.
 - Keyboard shortcuts to select things without relying on the pointer
 # How to use:
-- Buy the game from [https://www.deathandtaxesgame.com Placeholder Gameworks] (steam/itch)
-- Install [https://github.com/LavaGang/MelonLoader/releases MellonLoader] and point it to your game
+- Buy the game from [Placeholder Gameworks] (https://www.deathandtaxesgame.com) or from Steam/Itch directly
+- Install [MellonLoader] (https://github.com/LavaGang/MelonLoader/releases ) and point it to your game
 - Copy the mod DLL and NVDA controller client DLL to the mods folder of your game
 - Launch Death and Taxes. If Mellonloader is working a command window will open with info about the game. You should then hear screenreader (or TTS if no screenreader is detected) that the mod has loaded.
 - et voila!
