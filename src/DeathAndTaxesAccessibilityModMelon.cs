@@ -1,5 +1,6 @@
 // MelonLoader Mod Assembly Attributes
 using MelonLoader;
+using HarmonyLib;
 
 [assembly: MelonInfo(typeof(Death_and_Access.DeathAndTaxesAccessibilityModMelon), "Death and Taxes Accessibility Mod", "1.0.0", "Accessibility Mod Author")]
 [assembly: MelonGame("Placeholder Gameworks", "Death and Taxes")]
@@ -18,6 +19,7 @@ public class DeathAndTaxesAccessibilityModMelon : MelonMod
     private static bool _announcedInit = false;
     private static SpecificTextAnnouncer _specificTextAnnouncer;
     private static UiNavigationHandler _uiNavigationHandler;
+    private static HarmonyLib.Harmony _harmony;
     private static bool IsReady => _announcedInit && _accessibilityManager != null;
 
     public override void OnInitializeMelon()
@@ -33,6 +35,9 @@ public class DeathAndTaxesAccessibilityModMelon : MelonMod
             _specificTextAnnouncer.Initialize(_accessibilityManager.Screenreader);
             _uiNavigationHandler = new UiNavigationHandler();
             _uiNavigationHandler.Initialize(_accessibilityManager.Screenreader);
+
+            _harmony = new HarmonyLib.Harmony("Death_and_Access.VirtualCursorSync");
+            _harmony.PatchAll();
             
             MelonLogger.Msg("Death and Taxes Accessibility Mod initialized successfully!");
             _announcedInit = true;
@@ -58,6 +63,9 @@ public class DeathAndTaxesAccessibilityModMelon : MelonMod
             _specificTextAnnouncer?.Cleanup();
             _specificTextAnnouncer = null;
             _uiNavigationHandler = null;
+            UiNavigationHandler.ClearInstance();
+            _harmony?.UnpatchSelf();
+            _harmony = null;
             
             if (_accessibilityManager != null)
             {

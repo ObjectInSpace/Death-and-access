@@ -1,0 +1,19 @@
+C:\Users\amock\Death and access\Death and Access\bin\Debug\net472\Death and Access.dll
+C:\Users\amock\Death and access\Death and Access\bin\Debug\net472\Death and Access.pdb
+C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.csproj.AssemblyReference.cache
+C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.AssemblyInfoInputs.cache
+C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.AssemblyInfo.cs
+C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.csproj.CoreCompileInputs.cache
+C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.dll
+C:\Users\amock\Death and access\Death and Access\obj\Debug\net472\Death and Access.pdb
+C:\Users\amock\death-and-access\bin\Debug\net472\Death and Access.dll
+C:\Users\amock\death-and-access\bin\Debug\net472\Death and Access.pdb
+C:\Users\amock\death-and-access\obj\Debug\net472\Death and Access.csproj.AssemblyReference.cache
+C:\Users\amock\death-and-access\obj\Debug\net472\Death and Access.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\amock\death-and-access\obj\Debug\net472\Death and Access.AssemblyInfoInputs.cache
+C:\Users\amock\death-and-access\obj\Debug\net472\Death and Access.AssemblyInfo.cs
+C:\Users\amock\death-and-access\obj\Debug\net472\Death and Access.csproj.CoreCompileInputs.cache
+C:\Users\amock\death-and-access\obj\Debug\net472\Death and Access.sourcelink.json
+C:\Users\amock\death-and-access\obj\Debug\net472\Death and Access.dll
+C:\Users\amock\death-and-access\obj\Debug\net472\Death and Access.pdb

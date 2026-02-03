@@ -4,25 +4,13 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
+using MelonLoader;
 
 public sealed class UiNavigationHandler
 {
     private const int AxisRepeatMs = 150;
     private const float AxisDeadzone = 0.5f;
     private const int PointerStep = 24;
-    private const int SM_CXSCREEN = 0;
-    private const int SM_CYSCREEN = 1;
-
-    [DllImport("user32.dll")]
-    private static extern bool GetCursorPos(out POINT lpPoint);
-
-    [DllImport("user32.dll")]
-    private static extern bool SetCursorPos(int x, int y);
-
-    [DllImport("user32.dll")]
-    private static extern int GetSystemMetrics(int nIndex);
-    
     private Type _inputType;
     private Type _keyCodeType;
     private Type _textType;
@@ -32,6 +20,8 @@ public sealed class UiNavigationHandler
     private Type _hudManagerType;
     private Type _cameraType;
     private Type _screenType;
+    private Type _sceneManagerType;
+    private Type _sceneType;
     private Type _vector3Type;
     private Type _vector2Type;
     private Type _physics2DType;
@@ -86,10 +76,39 @@ public sealed class UiNavigationHandler
     private Type _demoEndScreenType;
     private Type _comicManagerType;
     private Type _unityObjectType;
+    private Type _inputSystemMouseType;
+    private Type _gameObjectType;
+    private Type _transformType;
+    private Type _canvasScalerType;
+    private Type _graphicRaycasterType;
+    private Type _imageType;
+    private Type _spriteType;
+    private Type _texture2DType;
+    private Type _colorType;
+    private Type _rectType;
+    private Type _renderModeType;
+    private Type _cursorType;
     private MethodInfo _getKeyDownMethod;
     private MethodInfo _getKeyMethod;
     private MethodInfo _getAxisRawMethod;
+    private MethodInfo _setMousePositionMethod;
+    private bool _setMousePositionUsesVector3;
+    private PropertyInfo _inputSystemMouseCurrentProp;
+    private MethodInfo _inputSystemMouseWarpMethod;
     private MethodInfo _findObjectsOfTypeMethod;
+    private object _virtualCursorCanvas;
+    private object _virtualCursorImage;
+    private object _virtualCursorRectTransform;
+    private object _virtualCursorTexture;
+    private object _virtualCursorSprite;
+    private float _virtualCursorTextureWidth;
+    private float _virtualCursorTextureHeight;
+    private (float x, float y)? _lastRawMousePos;
+    private bool _virtualCursorUsesFallback;
+    private int _nextArrowLogTick;
+    private bool _cursorHiddenForVirtual;
+    private (float x, float y)? _pendingShortcutScreenPos;
+    private int _nextShortcutLogTick;
     private int _nextKeyTick;
     private bool _axisUpHeld;
     private bool _axisDownHeld;
@@ -109,15 +128,51 @@ public sealed class UiNavigationHandler
     private int _keyboardNavUntilTick;
     private int _keyboardFocusUntilTick;
     private bool _keyboardFocusActive;
+    private bool _virtualCursorActive;
+    private (float x, float y) _virtualCursorPos;
+    private string _activeSceneName;
+    private string _elevatorSceneName;
+    private readonly HashSet<string> _allowedSceneNames = new(StringComparer.OrdinalIgnoreCase);
+    private bool _sceneChanging;
 
     public void Initialize(ScreenreaderProvider screenreader)
     {
+        Instance = this;
         _screenreader = screenreader;
+    }
+
+    internal static UiNavigationHandler Instance { get; private set; }
+
+    internal bool IsVirtualCursorActive => _virtualCursorActive;
+
+    internal void SubmitInteractableFromVirtual()
+    {
+        SubmitInteractable();
+    }
+
+    internal static void ClearInstance()
+    {
+        Instance = null;
+    }
+
+    internal bool TryGetVirtualCursorPosition(out float x, out float y)
+    {
+        if (!_virtualCursorActive)
+        {
+            x = 0f;
+            y = 0f;
+            return false;
+        }
+
+        x = _virtualCursorPos.x;
+        y = _virtualCursorPos.y;
+        return true;
     }
 
     public void Update()
     {
         EnsureTypes();
+        UpdateSceneFocusLock();
 
         if (IsSceneChanging())
             return;
@@ -143,20 +198,22 @@ public sealed class UiNavigationHandler
         if (TryAdjustFocusedSlider(direction))
             return;
 
-        if (IsMenuActive() && direction != NavigationDirection.None)
+        LogPaperworkShortcutState();
+
+        if (IsMenuActive() && !IsOfficeActive() && direction != NavigationDirection.None)
         {
             _pendingEventSystemSyncUntil = Environment.TickCount + 250;
             TryMoveEventSystemSelection(direction);
         }
 
-        if (IsMenuActive())
+        if (IsMenuActive() && !IsOfficeActive())
         {
             if (submitInteractPressed)
                 SubmitInteractable();
             return;
         }
 
-        if (direction != NavigationDirection.None && ShouldDeferToEventSystem() && IsPointerOverUi())
+        if (direction != NavigationDirection.None && !IsOfficeActive() && ShouldDeferToEventSystem() && IsPointerOverUi())
         {
             _pendingEventSystemSyncUntil = Environment.TickCount + 250;
             if (TryMoveEventSystemSelection(direction))
@@ -876,14 +933,28 @@ public sealed class UiNavigationHandler
         {
             if (GetKeyDown("Alpha" + i))
             {
+                MelonLoader.MelonLogger.Msg($"Paperwork shortcut keydown {i}.");
+                if (!TrySetPaperworkShortcutScreenPos(i - 1))
+                    return false;
                 var paperwork = GetPaperworkByIndex(i - 1);
+                if (paperwork == null)
+                    MelonLoader.MelonLogger.Msg($"Paperwork shortcut {i}: no paperwork at index.");
+                else
+                    MelonLoader.MelonLogger.Msg($"Paperwork shortcut {i}: found {paperwork.GetType().Name}.");
                 return ActivateInteractableWithFocus(paperwork);
             }
         }
 
         if (GetKeyDown("Alpha0"))
         {
+            MelonLoader.MelonLogger.Msg("Paperwork shortcut keydown 0.");
+            if (!TrySetPaperworkShortcutScreenPos(9))
+                return false;
             var paperwork = GetPaperworkByIndex(9);
+            if (paperwork == null)
+                MelonLoader.MelonLogger.Msg("Paperwork shortcut 0: no paperwork at index.");
+            else
+                MelonLoader.MelonLogger.Msg($"Paperwork shortcut 0: found {paperwork.GetType().Name}.");
             return ActivateInteractableWithFocus(paperwork);
         }
 
@@ -911,7 +982,17 @@ public sealed class UiNavigationHandler
         try
         {
             var value = Enum.Parse(enumType, side, ignoreCase: true);
-            var drawer = GetDrawerByType(value);
+            var drawer = GetDrawerByType(value) ?? GetGrimDeskDrawerByField(value);
+            if (drawer == null)
+                MelonLoader.MelonLogger.Msg($"Drawer shortcut {side}: drawer instance not found.");
+            if (drawer == null)
+                return false;
+
+            if (!TrySetDrawerShortcutScreenPos(drawer))
+            {
+                MelonLoader.MelonLogger.Msg($"Drawer shortcut {side}: no screen pos.");
+                return false;
+            }
             return ActivateInteractableWithFocus(drawer);
         }
         catch
@@ -1073,6 +1154,19 @@ public sealed class UiNavigationHandler
         if (interactable == null)
             return false;
 
+        interactable = ResolveInteractableForFocus(interactable);
+        if (interactable == null)
+            return false;
+
+        if (!CanActivateInteractableWithShortcut(interactable))
+            return false;
+
+        if (!TryMoveCursorToInteractable(interactable))
+        {
+            MelonLoader.MelonLogger.Msg($"Shortcut move failed: {interactable.GetType().Name}");
+            return false;
+        }
+
         var now = Environment.TickCount;
         _keyboardNavUntilTick = now + 500;
         _keyboardFocusUntilTick = now + 1500;
@@ -1083,6 +1177,160 @@ public sealed class UiNavigationHandler
             return true;
         if (!TryInvokeInteract(interactable))
             TryInvokeUiClick(interactable);
+        return true;
+    }
+
+    private bool TryMoveCursorToInteractable(object interactable)
+    {
+        interactable = ResolveInteractableForFocus(interactable);
+        if (interactable == null)
+            return false;
+
+        var screen = _pendingShortcutScreenPos ?? GetInteractableScreenPosition(interactable);
+        _pendingShortcutScreenPos = null;
+        if (screen == null)
+        {
+            MelonLoader.MelonLogger.Msg($"No screen position for: {interactable.GetType().Name}");
+            return false;
+        }
+
+        _virtualCursorPos = screen.Value;
+        _virtualCursorActive = true;
+        EnsureVirtualCursorOverlay();
+        SetSystemCursorVisible(false);
+        UpdateVirtualCursorOverlayPosition(screen.Value.x, screen.Value.y);
+        RefreshCursorSpriteIfNeeded();
+        return true;
+    }
+
+    private bool TrySetPaperworkShortcutScreenPos(int index)
+    {
+        var pos = GetPaperworkShortcutScreenPos(index);
+        if (pos == null)
+        {
+            MelonLoader.MelonLogger.Msg($"Paperwork shortcut {index + 1}: no screen pos from marker.");
+            return false;
+        }
+
+        _pendingShortcutScreenPos = pos;
+        return true;
+    }
+
+    private (float x, float y)? GetPaperworkShortcutScreenPos(int index)
+    {
+        if (_grimDeskType == null || index < 0)
+        {
+            MelonLoader.MelonLogger.Msg("Paperwork shortcut: GrimDesk type missing or index < 0.");
+            return null;
+        }
+
+        var desk = GetStaticInstance(_grimDeskType);
+        if (desk == null)
+        {
+            MelonLoader.MelonLogger.Msg("Paperwork shortcut: GrimDesk instance missing.");
+            return null;
+        }
+
+        var marker = GetMemberValue(desk, "PaperWorkSpawnMarker");
+        if (marker == null)
+        {
+            MelonLoader.MelonLogger.Msg("Paperwork shortcut: PaperWorkSpawnMarker missing.");
+            return null;
+        }
+
+        var markerPos = GetTransformPosition3(marker);
+        if (markerPos == null)
+        {
+            MelonLoader.MelonLogger.Msg("Paperwork shortcut: marker position missing.");
+            return null;
+        }
+
+        var offsetX = 1.0f * (index % 4);
+        var offsetY = 0.3f * (index % 4) - 0.6f * (float)Math.Floor(index / 4.0);
+        var offsetZ = (-index * 2f) - 3f;
+        var world = (x: markerPos.Value.x + offsetX, y: markerPos.Value.y + offsetY, z: markerPos.Value.z + offsetZ);
+
+        var screen = WorldToScreenPoint(world) ?? WorldToScreenPointWithCamera(world);
+        if (screen != null)
+            return screen;
+
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+        var fallback = ToScreenPosition((world.x, world.y), width, height);
+        if (fallback == null)
+            MelonLoader.MelonLogger.Msg($"Paperwork shortcut: fallback failed. width={width}, height={height}");
+        return fallback;
+    }
+
+    private bool TrySetDrawerShortcutScreenPos(object drawer)
+    {
+        if (drawer == null)
+            return false;
+
+        var center = GetMemberValue(drawer, "Collider");
+        var bounds = GetColliderBoundsCenter(center);
+        if (bounds != null)
+        {
+            var screen = WorldToScreenPoint(bounds.Value) ?? WorldToScreenPointWithCamera((bounds.Value.x, bounds.Value.y, 0f));
+            if (screen != null)
+            {
+                _pendingShortcutScreenPos = screen;
+                return true;
+            }
+        }
+
+        var pos = GetTransformPosition3(GetInteractableGameObject(drawer) ?? drawer);
+        if (pos != null)
+        {
+            var screen = WorldToScreenPoint(pos.Value) ?? WorldToScreenPointWithCamera(pos.Value);
+            if (screen != null)
+            {
+                _pendingShortcutScreenPos = screen;
+                return true;
+            }
+        }
+
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+        if (width > 0 && height > 0)
+        {
+            var fallbackX = string.Equals(drawer.GetType().GetProperty("Type")?.GetValue(drawer)?.ToString(), "Left", StringComparison.OrdinalIgnoreCase)
+                ? width * 0.25f
+                : width * 0.75f;
+            var fallbackY = height * 0.5f;
+            _pendingShortcutScreenPos = (fallbackX, fallbackY);
+            return true;
+        }
+
+        return false;
+    }
+
+    private object GetGrimDeskDrawerByField(object drawerTypeValue)
+    {
+        if (_grimDeskType == null || drawerTypeValue == null)
+            return null;
+
+        var desk = GetStaticInstance(_grimDeskType);
+        if (desk == null)
+            return null;
+
+        var name = drawerTypeValue.ToString();
+        if (string.Equals(name, "Left", StringComparison.OrdinalIgnoreCase))
+            return GetMemberValue(desk, "DrawerLeft");
+        if (string.Equals(name, "Right", StringComparison.OrdinalIgnoreCase))
+            return GetMemberValue(desk, "DrawerRight");
+
+        return null;
+    }
+
+    private bool CanActivateInteractableWithShortcut(object interactable)
+    {
+        if (interactable == null)
+            return false;
+
+        if (IsShopItem(interactable) && !IsShopItemOwned(interactable))
+            return false;
+
         return true;
     }
 
@@ -1291,6 +1539,8 @@ public sealed class UiNavigationHandler
         _hudManagerType ??= TypeResolver.Get("HUDManager");
         _cameraType ??= TypeResolver.Get("UnityEngine.Camera");
         _screenType ??= TypeResolver.Get("UnityEngine.Screen");
+        _sceneManagerType ??= TypeResolver.Get("UnityEngine.SceneManagement.SceneManager");
+        _sceneType ??= TypeResolver.Get("UnityEngine.SceneManagement.Scene");
         _vector3Type ??= TypeResolver.Get("UnityEngine.Vector3");
         _vector2Type ??= TypeResolver.Get("UnityEngine.Vector2");
         _physics2DType ??= TypeResolver.Get("UnityEngine.Physics2D");
@@ -1343,6 +1593,18 @@ public sealed class UiNavigationHandler
         _demoEndScreenType ??= TypeResolver.Get("DemoEndScreen");
         _comicManagerType ??= TypeResolver.Get("ComicManager");
         _unityObjectType ??= TypeResolver.Get("UnityEngine.Object");
+        _inputSystemMouseType ??= TypeResolver.Get("UnityEngine.InputSystem.Mouse");
+        _gameObjectType ??= TypeResolver.Get("UnityEngine.GameObject");
+        _transformType ??= TypeResolver.Get("UnityEngine.Transform");
+        _canvasScalerType ??= TypeResolver.Get("UnityEngine.UI.CanvasScaler");
+        _graphicRaycasterType ??= TypeResolver.Get("UnityEngine.UI.GraphicRaycaster");
+        _imageType ??= TypeResolver.Get("UnityEngine.UI.Image");
+        _spriteType ??= TypeResolver.Get("UnityEngine.Sprite");
+        _texture2DType ??= TypeResolver.Get("UnityEngine.Texture2D");
+        _colorType ??= TypeResolver.Get("UnityEngine.Color");
+        _rectType ??= TypeResolver.Get("UnityEngine.Rect");
+        _renderModeType ??= TypeResolver.Get("UnityEngine.RenderMode");
+        _cursorType ??= TypeResolver.Get("UnityEngine.Cursor");
         _findObjectsOfTypeMethod ??= _unityObjectType?.GetMethod(
             "FindObjectsOfType",
             BindingFlags.Public | BindingFlags.Static,
@@ -1352,7 +1614,17 @@ public sealed class UiNavigationHandler
         _getRayIntersectionMethod ??= _physics2DType?.GetMethod("GetRayIntersection", BindingFlags.Public | BindingFlags.Static, null, new[] { TypeResolver.Get("UnityEngine.Ray"), typeof(float) }, null)
             ?? _physics2DType?.GetMethod("GetRayIntersection", BindingFlags.Public | BindingFlags.Static);
         _getMousePositionMethod ??= _inputType?.GetProperty("mousePosition", BindingFlags.Public | BindingFlags.Static)?.GetGetMethod();
+        CacheInputSystemMethods();
         CacheInputMethods();
+    }
+
+    private void CacheInputSystemMethods()
+    {
+        if (_inputSystemMouseType == null)
+            return;
+
+        _inputSystemMouseCurrentProp ??= _inputSystemMouseType.GetProperty("current", BindingFlags.Public | BindingFlags.Static);
+        _inputSystemMouseWarpMethod ??= _inputSystemMouseType.GetMethod("WarpCursorPosition", BindingFlags.Public | BindingFlags.Instance);
     }
 
     private void CacheInputMethods()
@@ -1363,7 +1635,47 @@ public sealed class UiNavigationHandler
         _getKeyDownMethod ??= _inputType.GetMethod("GetKeyDown", BindingFlags.Public | BindingFlags.Static, null, new[] { _keyCodeType }, null);
         _getKeyMethod ??= _inputType.GetMethod("GetKey", BindingFlags.Public | BindingFlags.Static, null, new[] { _keyCodeType }, null);
         _getAxisRawMethod ??= _inputType.GetMethod("GetAxisRaw", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null);
+        CacheLegacyMouseWarp();
 
+    }
+
+    private void CacheLegacyMouseWarp()
+    {
+        if (_inputType == null)
+            return;
+
+        if (_setMousePositionMethod != null)
+            return;
+
+        if (_vector3Type != null)
+        {
+            _setMousePositionMethod = _inputType.GetMethod(
+                "SetMousePosition",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                null,
+                new[] { _vector3Type },
+                null);
+            if (_setMousePositionMethod != null)
+            {
+                _setMousePositionUsesVector3 = true;
+                return;
+            }
+        }
+
+        if (_vector2Type != null)
+        {
+            _setMousePositionMethod = _inputType.GetMethod(
+                "SetMousePosition",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                null,
+                new[] { _vector2Type },
+                null);
+            if (_setMousePositionMethod != null)
+            {
+                _setMousePositionUsesVector3 = false;
+                return;
+            }
+        }
     }
 
     private bool IsSceneChanging()
@@ -1388,6 +1700,65 @@ public sealed class UiNavigationHandler
         {
             return false;
         }
+    }
+
+    private void UpdateSceneFocusLock()
+    {
+        if (IsSceneChanging())
+        {
+            if (!_sceneChanging)
+            {
+                _sceneChanging = true;
+                ResetFocusForSceneChange();
+            }
+
+            return;
+        }
+
+        _sceneChanging = false;
+
+        var activeName = TryGetActiveUnitySceneName(out var unityScene) ? unityScene : null;
+        var elevatorName = TryGetElevatorSceneName(out var elevatorScene) ? elevatorScene : null;
+
+        var changed = !string.Equals(activeName, _activeSceneName, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(elevatorName, _elevatorSceneName, StringComparison.OrdinalIgnoreCase);
+
+        _activeSceneName = activeName;
+        _elevatorSceneName = elevatorName;
+
+        _allowedSceneNames.Clear();
+        if (!string.IsNullOrWhiteSpace(_activeSceneName))
+            _allowedSceneNames.Add(_activeSceneName);
+        if (!string.IsNullOrWhiteSpace(_elevatorSceneName))
+            _allowedSceneNames.Add(_elevatorSceneName);
+        _allowedSceneNames.Add("DontDestroyOnLoad");
+
+        if (changed)
+            ResetFocusForSceneChange();
+    }
+
+    private void ResetFocusForSceneChange()
+    {
+        ClearInteractableFocus();
+        ClearUiSelection();
+        _lastEventSelected = null;
+        _keyboardFocusActive = false;
+        _keyboardFocusUntilTick = 0;
+        _keyboardNavUntilTick = 0;
+        _pendingEventSystemSyncUntil = 0;
+        _virtualCursorActive = false;
+        _virtualCursorTexture = null;
+        _virtualCursorSprite = null;
+        _virtualCursorTextureWidth = 0f;
+        _virtualCursorTextureHeight = 0f;
+        _lastRawMousePos = null;
+        _virtualCursorUsesFallback = false;
+        _nextArrowLogTick = 0;
+        _cursorHiddenForVirtual = false;
+        _pendingShortcutScreenPos = null;
+        _nextShortcutLogTick = 0;
+        VirtualMouseState.Reset();
+        SetVirtualCursorOverlayVisible(false);
     }
 
     private bool IsPointerOverUi()
@@ -1432,7 +1803,8 @@ public sealed class UiNavigationHandler
                     continue;
 
                 var goProp = item.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
-                if (goProp?.GetValue(item) != null)
+                var go = goProp?.GetValue(item);
+                if (go != null && IsInAllowedScene(go))
                     return true;
             }
         }
@@ -1460,11 +1832,26 @@ public sealed class UiNavigationHandler
 
     private void UpdateVirtualCursorFocus(NavigationDirection direction, bool submitPressed, float axisX, float axisY)
     {
-        UpdatePointerFromInput(axisX, axisY);
+        var moved = UpdatePointerFromInput(axisX, axisY, direction, out var sawArrowInput);
+        if (!moved)
+            SyncVirtualCursorToRawMouse();
 
         if (_lastFocusedInteractable != null && !IsInteractableActive(_lastFocusedInteractable))
         {
             ClearInteractableFocus();
+        }
+
+        if (sawArrowInput && !_virtualCursorActive)
+            ActivateVirtualCursorFromRaw();
+
+        if (_virtualCursorActive)
+        {
+            SetSystemCursorVisible(false);
+            RefreshCursorSpriteIfNeeded();
+        }
+        else
+        {
+            SetSystemCursorVisible(true);
         }
 
         var mousePosition = GetMousePosition();
@@ -1486,9 +1873,23 @@ public sealed class UiNavigationHandler
             return;
         }
 
+        var uiHit = GetUiRaycastGameObject();
         var hit = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
         if (hit == null)
         {
+            if (uiHit != null)
+            {
+                var selectable = _selectableType != null ? GetComponentByType(uiHit, _selectableType) : null;
+                var target = selectable ?? uiHit;
+                if (!ReferenceEquals(target, _lastFocusedInteractable))
+                    SetInteractableFocus(target);
+
+                if (submitPressed)
+                    SubmitInteractable();
+
+                return;
+            }
+
             if (submitPressed)
             {
                 SubmitInteractable();
@@ -1512,33 +1913,660 @@ public sealed class UiNavigationHandler
             SubmitInteractable();
     }
 
-    private void UpdatePointerFromInput(float axisX, float axisY)
+    private bool UpdatePointerFromInput(float axisX, float axisY, NavigationDirection direction, out bool sawArrowInput)
     {
-        var movement = GetPointerMovementVector(axisX, axisY);
-        if (movement.x == 0f && movement.y == 0f)
-            return;
+        var left = GetKey("LeftArrow");
+        var right = GetKey("RightArrow");
+        var up = GetKey("UpArrow");
+        var down = GetKey("DownArrow");
+        sawArrowInput = left || right || up || down
+            || axisX < -AxisDeadzone || axisX > AxisDeadzone
+            || axisY < -AxisDeadzone || axisY > AxisDeadzone;
 
-        MoveSystemCursor(movement.x, movement.y);
+        if (sawArrowInput)
+            LogArrowInput(left, right, up, down, axisX, axisY);
+
+        var movement = GetPointerMovementVector(axisX, axisY);
+        if (movement.x == 0f && movement.y == 0f && direction != NavigationDirection.None)
+        {
+            movement = direction switch
+            {
+                NavigationDirection.Left => (-1f, 0f),
+                NavigationDirection.Right => (1f, 0f),
+                NavigationDirection.Up => (0f, 1f),
+                NavigationDirection.Down => (0f, -1f),
+                _ => movement
+            };
+        }
+
+        if (movement.x == 0f && movement.y == 0f)
+            return false;
+
+        MoveVirtualCursor(movement.x, movement.y);
         _keyboardFocusActive = true;
+        return true;
     }
 
-    private void MoveSystemCursor(float dx, float dy)
+    private void ActivateVirtualCursorFromRaw()
+    {
+        var raw = GetRawMousePosition();
+        if (raw == null)
+        {
+            var width = Math.Max(GetScreenDimension("width"), 1);
+            var height = Math.Max(GetScreenDimension("height"), 1);
+            _virtualCursorPos = (width / 2f, height / 2f);
+        }
+        else
+        {
+            _virtualCursorPos = raw.Value;
+        }
+        _virtualCursorActive = true;
+        EnsureVirtualCursorOverlay();
+        UpdateVirtualCursorOverlayPosition(_virtualCursorPos.x, _virtualCursorPos.y);
+    }
+
+    private void LogArrowInput(bool left, bool right, bool up, bool down, float axisX, float axisY)
+    {
+        var now = Environment.TickCount;
+        if (now < _nextArrowLogTick)
+            return;
+
+        _nextArrowLogTick = now + 1000;
+        MelonLogger.Msg($"Arrow input: keys(L/R/U/D)=({left},{right},{up},{down}), axis=({axisX:0.00},{axisY:0.00}), virtualActive={_virtualCursorActive}");
+    }
+
+    private void LogPaperworkShortcutState()
+    {
+        var now = Environment.TickCount;
+        if (now < _nextShortcutLogTick)
+            return;
+
+        if (!IsOfficeActive())
+            return;
+
+        var anyDown = GetKeyDown("Alpha1") || GetKeyDown("Alpha2") || GetKeyDown("Alpha3") || GetKeyDown("Alpha4")
+                      || GetKeyDown("Alpha5") || GetKeyDown("Alpha6") || GetKeyDown("Alpha7") || GetKeyDown("Alpha8")
+                      || GetKeyDown("Alpha9") || GetKeyDown("Alpha0");
+
+        if (!anyDown)
+            return;
+
+        _nextShortcutLogTick = now + 1000;
+        MelonLogger.Msg("Paperwork shortcut keydown detected (1-0).");
+    }
+
+    private void SyncVirtualCursorToRawMouse()
+    {
+        var raw = GetRawMousePosition();
+        if (raw == null)
+            return;
+
+        if (_lastRawMousePos == null)
+        {
+            _lastRawMousePos = raw;
+            return;
+        }
+
+        var dx = Math.Abs(raw.Value.x - _lastRawMousePos.Value.x);
+        var dy = Math.Abs(raw.Value.y - _lastRawMousePos.Value.y);
+        _lastRawMousePos = raw;
+
+        if (dx <= 0.5f && dy <= 0.5f)
+            return;
+
+        if (_virtualCursorActive)
+        {
+            _virtualCursorActive = false;
+            SetVirtualCursorOverlayVisible(false);
+        }
+    }
+
+    private void MoveVirtualCursor(float dx, float dy)
     {
         if (dx == 0f && dy == 0f)
             return;
 
-        if (!GetCursorPos(out var point))
-            return;
+        if (!_virtualCursorActive)
+        {
+            var raw = GetRawMousePosition();
+            if (raw == null)
+            {
+                var width = Math.Max(GetScreenDimension("width"), 1);
+                var height = Math.Max(GetScreenDimension("height"), 1);
+                _virtualCursorPos = (width / 2f, height / 2f);
+            }
+            else
+            {
+                _virtualCursorPos = raw.Value;
+            }
+            _virtualCursorActive = true;
+            EnsureVirtualCursorOverlay();
+            UpdateVirtualCursorOverlayPosition(_virtualCursorPos.x, _virtualCursorPos.y);
+        }
 
-        var screenWidth = Math.Max(GetSystemMetrics(SM_CXSCREEN), 1);
-        var screenHeight = Math.Max(GetSystemMetrics(SM_CYSCREEN), 1);
+        var screenWidth = Math.Max(GetScreenDimension("width"), 1);
+        var screenHeight = Math.Max(GetScreenDimension("height"), 1);
 
-        var targetX = point.X + (int)(dx * PointerStep);
-        var targetY = point.Y - (int)(dy * PointerStep);
+        var targetX = _virtualCursorPos.x + (dx * PointerStep);
+        var targetY = _virtualCursorPos.y + (dy * PointerStep);
         targetX = Math.Max(0, Math.Min(targetX, screenWidth - 1));
         targetY = Math.Max(0, Math.Min(targetY, screenHeight - 1));
 
-        SetCursorPos(targetX, targetY);
+        _virtualCursorPos = (targetX, targetY);
+        UpdateVirtualCursorOverlayPosition(targetX, targetY);
+        RefreshCursorSpriteIfNeeded();
+    }
+
+    private void EnsureVirtualCursorOverlay()
+    {
+        if (_virtualCursorCanvas != null)
+        {
+            SetVirtualCursorOverlayVisible(true);
+            return;
+        }
+
+        if (_gameObjectType == null || _canvasType == null || _rectTransformType == null || _imageType == null || _vector2Type == null)
+            return;
+
+        try
+        {
+            var canvasGo = Activator.CreateInstance(_gameObjectType, "DAA_VirtualCursorCanvas");
+            if (canvasGo == null)
+                return;
+
+            var addComponent = _gameObjectType.GetMethod("AddComponent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            if (addComponent == null)
+                return;
+
+            var canvas = addComponent.Invoke(canvasGo, new object[] { _canvasType });
+            if (canvas != null)
+            {
+                var renderModeProp = _canvasType.GetProperty("renderMode", BindingFlags.Instance | BindingFlags.Public);
+                if (renderModeProp != null && _renderModeType != null)
+                {
+                    var overlay = Enum.Parse(_renderModeType, "ScreenSpaceOverlay");
+                    renderModeProp.SetValue(canvas, overlay);
+                }
+
+                var sortingOrderProp = _canvasType.GetProperty("sortingOrder", BindingFlags.Instance | BindingFlags.Public);
+                sortingOrderProp?.SetValue(canvas, 5000);
+            }
+
+            if (_canvasScalerType != null)
+                addComponent.Invoke(canvasGo, new object[] { _canvasScalerType });
+            if (_graphicRaycasterType != null)
+                addComponent.Invoke(canvasGo, new object[] { _graphicRaycasterType });
+
+            var cursorGo = Activator.CreateInstance(_gameObjectType, "DAA_VirtualCursor");
+            if (cursorGo == null)
+                return;
+
+            var cursorTransform = GetMemberValue(cursorGo, "transform");
+            var canvasTransform = GetMemberValue(canvasGo, "transform");
+            if (cursorTransform != null && canvasTransform != null && _transformType != null)
+            {
+                var setParent = _transformType.GetMethod("SetParent", BindingFlags.Instance | BindingFlags.Public, null, new[] { _transformType, typeof(bool) }, null);
+                setParent?.Invoke(cursorTransform, new[] { canvasTransform, false });
+            }
+
+            _virtualCursorImage = addComponent.Invoke(cursorGo, new object[] { _imageType });
+            _virtualCursorRectTransform = GetComponentByType(cursorGo, _rectTransformType);
+
+            if (_virtualCursorImage != null)
+            {
+                var raycastProp = _imageType.GetProperty("raycastTarget", BindingFlags.Instance | BindingFlags.Public);
+                raycastProp?.SetValue(_virtualCursorImage, false);
+
+                var sprite = GetGameCursorSprite();
+                if (sprite != null)
+                {
+                    var spriteProp = _imageType.GetProperty("sprite", BindingFlags.Instance | BindingFlags.Public);
+                    spriteProp?.SetValue(_virtualCursorImage, sprite);
+                }
+
+                if (_colorType != null)
+                {
+                    var colorProp = _imageType.GetProperty("color", BindingFlags.Instance | BindingFlags.Public);
+                    if (colorProp != null)
+                    {
+                        var color = CreateColor(1f, 1f, 1f, 1f);
+                        if (color != null)
+                            colorProp.SetValue(_virtualCursorImage, color);
+                    }
+                }
+            }
+
+            if (_virtualCursorRectTransform != null)
+            {
+                SetRectTransformVector2(_virtualCursorRectTransform, "anchorMin", 0f, 0f);
+                SetRectTransformVector2(_virtualCursorRectTransform, "anchorMax", 0f, 0f);
+                var hotspot = GetGameCursorHotspot();
+                var size = GetVirtualCursorSize();
+                var pivot = GetHotspotPivot(size.width, size.height, hotspot);
+                var pivotX = pivot.x;
+                var pivotY = pivot.y;
+                SetRectTransformVector2(_virtualCursorRectTransform, "pivot", pivotX, pivotY);
+                SetRectTransformVector2(_virtualCursorRectTransform, "sizeDelta", size.width, size.height);
+            }
+
+            _virtualCursorCanvas = canvasGo;
+            SetVirtualCursorOverlayVisible(true);
+            RefreshCursorSpriteIfNeeded();
+
+            var dontDestroy = _unityObjectType?.GetMethod("DontDestroyOnLoad", BindingFlags.Public | BindingFlags.Static, null, new[] { _unityObjectType }, null);
+            dontDestroy?.Invoke(null, new[] { canvasGo });
+        }
+        catch
+        {
+            _virtualCursorCanvas = null;
+            _virtualCursorImage = null;
+            _virtualCursorRectTransform = null;
+        }
+    }
+
+    private void SetVirtualCursorOverlayVisible(bool visible)
+    {
+        if (_virtualCursorCanvas == null || _gameObjectType == null)
+            return;
+
+        try
+        {
+            var setActive = _gameObjectType.GetMethod("SetActive", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(bool) }, null);
+            setActive?.Invoke(_virtualCursorCanvas, new object[] { visible });
+            SetSystemCursorVisible(!visible);
+        }
+        catch
+        {
+            // Ignore.
+        }
+    }
+
+    private void SetSystemCursorVisible(bool visible)
+    {
+        if (_cursorType == null)
+            return;
+
+        if (visible && !_cursorHiddenForVirtual)
+            return;
+
+        if (!visible && _cursorHiddenForVirtual)
+            return;
+
+        try
+        {
+            var prop = _cursorType.GetProperty("visible", BindingFlags.Public | BindingFlags.Static);
+            prop?.SetValue(null, visible);
+            _cursorHiddenForVirtual = !visible;
+        }
+        catch
+        {
+            // Ignore.
+        }
+    }
+
+    private void UpdateVirtualCursorOverlayPosition(float x, float y)
+    {
+        if (_virtualCursorRectTransform == null)
+            return;
+
+        SetRectTransformVector2(_virtualCursorRectTransform, "anchoredPosition", x, y);
+    }
+
+    private object GetGameCursorSprite()
+    {
+        if (_virtualCursorSprite != null)
+            return _virtualCursorSprite;
+
+        if (_texture2DType == null || _spriteType == null || _rectType == null || _vector2Type == null)
+            return null;
+
+        try
+        {
+            var texture = GetGameCursorTexture();
+            if (texture == null)
+            {
+                _virtualCursorUsesFallback = true;
+                _virtualCursorSprite = CreateFallbackCursorSprite();
+                return _virtualCursorSprite;
+            }
+
+            var width = GetTextureDimension(texture, "width");
+            var height = GetTextureDimension(texture, "height");
+            if (width <= 0 || height <= 0)
+                return null;
+
+            _virtualCursorTextureWidth = width;
+            _virtualCursorTextureHeight = height;
+
+            var rectCtor = _rectType.GetConstructor(new[] { typeof(float), typeof(float), typeof(float), typeof(float) });
+            var rect = rectCtor?.Invoke(new object[] { 0f, 0f, width, height });
+            if (rect == null)
+                return null;
+
+            var pivot = CreateVector2(0f, 0f);
+            if (pivot == null)
+                return null;
+
+            var create = _spriteType.GetMethod("Create", BindingFlags.Public | BindingFlags.Static, null, new[] { _texture2DType, _rectType, _vector2Type, typeof(float) }, null)
+                        ?? _spriteType.GetMethod("Create", BindingFlags.Public | BindingFlags.Static, null, new[] { _texture2DType, _rectType, _vector2Type }, null);
+            if (create == null)
+                return null;
+
+            var args = create.GetParameters().Length == 4
+                ? new object[] { texture, rect, pivot, 100f }
+                : new object[] { texture, rect, pivot };
+
+            _virtualCursorUsesFallback = false;
+            _virtualCursorSprite = create.Invoke(null, args);
+            return _virtualCursorSprite;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void RefreshCursorSpriteIfNeeded()
+    {
+        if (_virtualCursorImage == null || _imageType == null)
+            return;
+
+        if (!_virtualCursorUsesFallback)
+            return;
+
+        var texture = GetGameCursorTexture();
+        if (texture == null)
+            return;
+
+        _virtualCursorSprite = null;
+        _virtualCursorTextureWidth = 0f;
+        _virtualCursorTextureHeight = 0f;
+        _virtualCursorUsesFallback = false;
+
+        var sprite = GetGameCursorSprite();
+        if (sprite == null)
+            return;
+
+        try
+        {
+            var spriteProp = _imageType.GetProperty("sprite", BindingFlags.Instance | BindingFlags.Public);
+            spriteProp?.SetValue(_virtualCursorImage, sprite);
+
+            var hotspot = GetGameCursorHotspot();
+            var size = GetVirtualCursorSize();
+            var pivot = GetHotspotPivot(size.width, size.height, hotspot);
+            SetRectTransformVector2(_virtualCursorRectTransform, "pivot", pivot.x, pivot.y);
+            SetRectTransformVector2(_virtualCursorRectTransform, "sizeDelta", size.width, size.height);
+        }
+        catch
+        {
+            // Ignore refresh failures.
+        }
+    }
+
+    private object CreateFallbackCursorSprite()
+    {
+        if (_texture2DType == null || _spriteType == null || _rectType == null || _vector2Type == null || _colorType == null)
+            return null;
+
+        try
+        {
+            var ctor = _texture2DType.GetConstructor(new[] { typeof(int), typeof(int) });
+            if (ctor == null)
+                return null;
+
+            var texture = ctor.Invoke(new object[] { 16, 16 });
+            if (texture == null)
+                return null;
+
+            var color = CreateColor(1f, 1f, 1f, 1f);
+            if (color == null)
+                return null;
+
+            var colors = Array.CreateInstance(_colorType, 16 * 16);
+            for (var i = 0; i < colors.Length; i++)
+                colors.SetValue(color, i);
+
+            var setPixels = _texture2DType.GetMethod("SetPixels", BindingFlags.Instance | BindingFlags.Public, null, new[] { colors.GetType() }, null);
+            setPixels?.Invoke(texture, new object[] { colors });
+
+            var apply = _texture2DType.GetMethod("Apply", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+            apply?.Invoke(texture, null);
+
+            var rectCtor = _rectType.GetConstructor(new[] { typeof(float), typeof(float), typeof(float), typeof(float) });
+            var rect = rectCtor?.Invoke(new object[] { 0f, 0f, 16f, 16f });
+            if (rect == null)
+                return null;
+
+            var pivot = CreateVector2(0f, 0f);
+            if (pivot == null)
+                return null;
+
+            var create = _spriteType.GetMethod("Create", BindingFlags.Public | BindingFlags.Static, null, new[] { _texture2DType, _rectType, _vector2Type, typeof(float) }, null)
+                        ?? _spriteType.GetMethod("Create", BindingFlags.Public | BindingFlags.Static, null, new[] { _texture2DType, _rectType, _vector2Type }, null);
+            if (create == null)
+                return null;
+
+            var args = create.GetParameters().Length == 4
+                ? new object[] { texture, rect, pivot, 100f }
+                : new object[] { texture, rect, pivot };
+
+            _virtualCursorTextureWidth = 16f;
+            _virtualCursorTextureHeight = 16f;
+            return create.Invoke(null, args);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private object GetGameCursorTexture()
+    {
+        if (_virtualCursorTexture != null)
+            return _virtualCursorTexture;
+
+        if (_inputManagerType == null)
+            return null;
+
+        var instance = GetStaticInstance(_inputManagerType);
+        if (instance == null)
+            return null;
+
+        var texture = GetMemberValue(instance, "TextureCursor");
+        if (texture == null)
+            return null;
+
+        _virtualCursorTexture = texture;
+        return texture;
+    }
+
+    private (float width, float height) GetVirtualCursorSize()
+    {
+        if (_virtualCursorTextureWidth > 0f && _virtualCursorTextureHeight > 0f)
+            return (_virtualCursorTextureWidth, _virtualCursorTextureHeight);
+
+        var texture = GetGameCursorTexture();
+        if (texture == null)
+            return (16f, 16f);
+
+        var width = GetTextureDimension(texture, "width");
+        var height = GetTextureDimension(texture, "height");
+        if (width > 0f)
+            _virtualCursorTextureWidth = width;
+        if (height > 0f)
+            _virtualCursorTextureHeight = height;
+
+        if (_virtualCursorTextureWidth <= 0f || _virtualCursorTextureHeight <= 0f)
+            return (16f, 16f);
+
+        return (_virtualCursorTextureWidth, _virtualCursorTextureHeight);
+    }
+
+    private (float x, float y) GetGameCursorHotspot()
+    {
+        if (_inputManagerType == null)
+            return (0f, 0f);
+
+        var instance = GetStaticInstance(_inputManagerType);
+        if (instance == null)
+            return (0f, 0f);
+
+        var hotspot = GetMemberValue(instance, "CursorHotSpot");
+        var pos = GetVector2FromValue(hotspot);
+        return pos ?? (0f, 0f);
+    }
+
+    private (float x, float y) GetHotspotPivot(float width, float height, (float x, float y) hotspot)
+    {
+        if (width <= 0f || height <= 0f)
+            return (0f, 1f);
+
+        var pivotX = hotspot.x / width;
+        var pivotY = 1f - (hotspot.y / height);
+
+        if (pivotX < 0f) pivotX = 0f;
+        if (pivotX > 1f) pivotX = 1f;
+        if (pivotY < 0f) pivotY = 0f;
+        if (pivotY > 1f) pivotY = 1f;
+
+        return (pivotX, pivotY);
+    }
+
+    private float GetTextureDimension(object texture, string name)
+    {
+        if (texture == null)
+            return 0f;
+
+        try
+        {
+            var prop = texture.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public);
+            if (prop == null)
+                return 0f;
+
+            var value = prop.GetValue(texture);
+            if (value is int intValue)
+                return intValue;
+            if (value is float floatValue)
+                return floatValue;
+        }
+        catch
+        {
+            return 0f;
+        }
+
+        return 0f;
+    }
+
+    private object CreateVector2(float x, float y)
+    {
+        if (_vector2Type == null)
+            return null;
+
+        var ctor = _vector2Type.GetConstructor(new[] { typeof(float), typeof(float) });
+        return ctor?.Invoke(new object[] { x, y });
+    }
+
+    private object CreateColor(float r, float g, float b, float a)
+    {
+        if (_colorType == null)
+            return null;
+
+        var color = Activator.CreateInstance(_colorType);
+        var rField = _colorType.GetField("r", BindingFlags.Instance | BindingFlags.Public);
+        var gField = _colorType.GetField("g", BindingFlags.Instance | BindingFlags.Public);
+        var bField = _colorType.GetField("b", BindingFlags.Instance | BindingFlags.Public);
+        var aField = _colorType.GetField("a", BindingFlags.Instance | BindingFlags.Public);
+        rField?.SetValue(color, r);
+        gField?.SetValue(color, g);
+        bField?.SetValue(color, b);
+        aField?.SetValue(color, a);
+        return color;
+    }
+
+    private void SetRectTransformVector2(object rectTransform, string name, float x, float y)
+    {
+        if (rectTransform == null || _rectTransformType == null || _vector2Type == null)
+            return;
+
+        try
+        {
+            var prop = _rectTransformType.GetProperty(name, BindingFlags.Instance | BindingFlags.Public);
+            if (prop == null)
+                return;
+
+            var vector = CreateVector2(x, y);
+            if (vector != null)
+                prop.SetValue(rectTransform, vector);
+        }
+        catch
+        {
+            // Ignore.
+        }
+    }
+
+    private void TryWarpCursor(float x, float y)
+    {
+        if (_vector2Type == null)
+            return;
+
+        if (_inputSystemMouseType == null)
+            _inputSystemMouseType = TypeResolver.Get("UnityEngine.InputSystem.Mouse");
+
+        if (_inputSystemMouseCurrentProp == null || _inputSystemMouseWarpMethod == null)
+            CacheInputSystemMethods();
+
+        if (_inputSystemMouseCurrentProp != null && _inputSystemMouseWarpMethod != null)
+        {
+            try
+            {
+                var mouse = _inputSystemMouseCurrentProp.GetValue(null);
+                if (mouse != null)
+                {
+                    var ctor = _vector2Type.GetConstructor(new[] { typeof(float), typeof(float) });
+                    if (ctor != null)
+                    {
+                        var vector = ctor.Invoke(new object[] { x, y });
+                        _inputSystemMouseWarpMethod.Invoke(mouse, new[] { vector });
+                        return;
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore warp failures; fall back to legacy input if available.
+            }
+        }
+
+        CacheLegacyMouseWarp();
+        if (_setMousePositionMethod == null)
+            return;
+
+        try
+        {
+            if (_setMousePositionUsesVector3 && _vector3Type != null)
+            {
+                var ctor3 = _vector3Type.GetConstructor(new[] { typeof(float), typeof(float), typeof(float) });
+                if (ctor3 == null)
+                    return;
+
+                var vector3 = ctor3.Invoke(new object[] { x, y, 0f });
+                _setMousePositionMethod.Invoke(null, new[] { vector3 });
+            }
+            else
+            {
+                var ctor2 = _vector2Type.GetConstructor(new[] { typeof(float), typeof(float) });
+                if (ctor2 == null)
+                    return;
+
+                var vector2 = ctor2.Invoke(new object[] { x, y });
+                _setMousePositionMethod.Invoke(null, new[] { vector2 });
+            }
+        }
+        catch
+        {
+            // Ignore warp failures; virtual cursor still works for hit tests.
+        }
     }
 
     private (float x, float y) GetPointerMovementVector(float axisX, float axisY)
@@ -1602,7 +2630,7 @@ public sealed class UiNavigationHandler
 
                 var goProp = item.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
                 var go = goProp?.GetValue(item);
-                if (go != null)
+                if (go != null && IsInAllowedScene(go))
                     return go;
             }
         }
@@ -2026,6 +3054,16 @@ public sealed class UiNavigationHandler
         if (screen != null)
             return screen;
 
+        if (width > 0 && height > 0)
+        {
+            if (position.x >= 0 && position.y >= 0 && position.x <= width && position.y <= height)
+                return position;
+
+            var fallbackX = Clamp(position.x, 0f, width - 1);
+            var fallbackY = Clamp(position.y, 0f, height - 1);
+            return (fallbackX, fallbackY);
+        }
+
         if (position.x >= 0 && position.y >= 0 && position.x <= width && position.y <= height)
             return position;
 
@@ -2349,7 +3387,19 @@ public sealed class UiNavigationHandler
             yield break;
 
         foreach (var item in result)
+        {
+            if (item == null)
+                continue;
+
+            if (!IsInAllowedScene(item))
+                continue;
+
+            var go = GetInteractableGameObject(item) ?? GetGameObjectFromComponent(item) ?? GetMemberValue(item, "gameObject");
+            if (go != null && !IsGameObjectActive(go))
+                continue;
+
             yield return item;
+        }
     }
 
     private object GetComponentByType(object gameObject, Type type)
@@ -2406,6 +3456,113 @@ public sealed class UiNavigationHandler
     }
 
     private (float x, float y)? GetMousePosition()
+    {
+        if (_virtualCursorActive)
+            return _virtualCursorPos;
+
+        return GetRawMousePosition();
+    }
+
+    private bool TryGetElevatorSceneName(out string sceneName)
+    {
+        sceneName = null;
+
+        if (_elevatorManagerType != null)
+        {
+            var instance = GetStaticInstance(_elevatorManagerType);
+            if (instance != null)
+            {
+                var changing = GetMemberValue(instance, "bIsChangingScene");
+                if (changing is bool changingScene && changingScene)
+                    return false;
+
+                var method = _elevatorManagerType.GetMethod("GetCurrentScene", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (method != null)
+                {
+                    try
+                    {
+                        var sceneObj = method.Invoke(instance, null);
+                        if (sceneObj != null)
+                        {
+                            sceneName = sceneObj.ToString();
+                            return true;
+                        }
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryGetActiveUnitySceneName(out string sceneName)
+    {
+        sceneName = null;
+        if (_sceneManagerType == null || _sceneType == null)
+            return false;
+
+        try
+        {
+            var method = _sceneManagerType.GetMethod("GetActiveScene", BindingFlags.Public | BindingFlags.Static);
+            if (method == null)
+                return false;
+
+            var scene = method.Invoke(null, null);
+            if (scene == null)
+                return false;
+
+            var nameProp = scene.GetType().GetProperty("name", BindingFlags.Instance | BindingFlags.Public);
+            sceneName = nameProp?.GetValue(scene) as string;
+            return !string.IsNullOrWhiteSpace(sceneName);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsInAllowedScene(object target)
+    {
+        if (target == null || _allowedSceneNames.Count == 0)
+            return true;
+
+        var go = GetInteractableGameObject(target) ?? GetGameObjectFromComponent(target) ?? GetMemberValue(target, "gameObject");
+        if (go == null)
+            return true;
+
+        var sceneName = GetGameObjectSceneName(go);
+        if (string.IsNullOrWhiteSpace(sceneName))
+            return true;
+
+        return _allowedSceneNames.Contains(sceneName);
+    }
+
+    private string GetGameObjectSceneName(object gameObject)
+    {
+        if (gameObject == null)
+            return null;
+
+        try
+        {
+            var sceneProp = gameObject.GetType().GetProperty("scene", BindingFlags.Instance | BindingFlags.Public);
+            var scene = sceneProp?.GetValue(gameObject);
+            if (scene == null)
+                return null;
+
+            var nameProp = scene.GetType().GetProperty("name", BindingFlags.Instance | BindingFlags.Public);
+            return nameProp?.GetValue(scene) as string;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private (float x, float y)? GetRawMousePosition()
     {
         if (_inputType == null || _vector3Type == null)
             return null;
@@ -2508,7 +3665,8 @@ public sealed class UiNavigationHandler
             if (interactable != null)
             {
                 var resolved = ResolveInteractableForFocus(interactable);
-                return FilterDialogInteractable(resolved);
+                resolved = FilterDialogInteractable(resolved);
+                return IsInAllowedScene(resolved) ? resolved : null;
             }
 
             var overlapPoint = _physics2DType.GetMethod("OverlapPoint", BindingFlags.Public | BindingFlags.Static, null, new[] { _vector2Type }, null);
@@ -2531,7 +3689,8 @@ public sealed class UiNavigationHandler
 
             var overlapInteractable = overlapComponentInParent.Invoke(overlapGameObject, new object[] { _interactableType });
             var resolvedOverlap = ResolveInteractableForFocus(overlapInteractable);
-            return FilterDialogInteractable(resolvedOverlap);
+            resolvedOverlap = FilterDialogInteractable(resolvedOverlap);
+            return IsInAllowedScene(resolvedOverlap) ? resolvedOverlap : null;
         }
         catch
         {
@@ -2691,7 +3850,13 @@ public sealed class UiNavigationHandler
 
     private bool IsPaperwork(object interactable)
     {
-        return _paperworkType != null && interactable != null && _paperworkType.IsInstanceOfType(interactable);
+        if (interactable == null)
+            return false;
+
+        if (_paperworkType != null && _paperworkType.IsInstanceOfType(interactable))
+            return true;
+
+        return string.Equals(interactable.GetType().Name, "Paperwork", StringComparison.Ordinal);
     }
 
     private bool IsPaperworkMark(object interactable)
@@ -3248,6 +4413,26 @@ public sealed class UiNavigationHandler
 
     private void SubmitInteractable()
     {
+        var uiObject = GetUiRaycastGameObject();
+        if (uiObject != null)
+        {
+            SetUiSelected(uiObject);
+            _lastFocusedInteractable = uiObject;
+            TryInvokeUiClick(uiObject);
+            return;
+        }
+
+        if (_virtualCursorActive)
+        {
+            var mousePosition = GetMousePosition();
+            if (mousePosition != null)
+            {
+                var hit = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
+                if (hit != null)
+                    _lastFocusedInteractable = hit;
+            }
+        }
+
         if (_lastFocusedInteractable == null)
         {
             _lastFocusedInteractable = GetInputManagerLastHit();
@@ -3265,7 +4450,18 @@ public sealed class UiNavigationHandler
         }
 
         if (_lastFocusedInteractable == null)
+        {
+            var mousePosition = GetMousePosition();
+            if (mousePosition != null)
+                _lastFocusedInteractable = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
+        }
+
+        if (_lastFocusedInteractable == null)
             return;
+
+        var paperworkParent = GetPaperworkParent(_lastFocusedInteractable) ?? GetPaperworkFromHierarchy(_lastFocusedInteractable);
+        if (paperworkParent != null)
+            _lastFocusedInteractable = paperworkParent;
 
         if (TryErasePaperworkMark(_lastFocusedInteractable))
             return;
@@ -3757,6 +4953,74 @@ public sealed class UiNavigationHandler
 
     private (float x, float y)? GetInteractableScreenPosition(object interactable)
     {
+        var isPaperwork = IsPaperwork(interactable);
+        if (interactable != null)
+            MelonLoader.MelonLogger.Msg($"ScreenPos target={interactable.GetType().Name}, isPaperwork={isPaperwork}");
+
+        if (isPaperwork)
+        {
+            var paperCollider = GetMemberValue(interactable, "ColliderPaperwork");
+            var paperCenter = GetColliderBoundsCenter(paperCollider);
+            if (paperCenter != null)
+            {
+                var paperScreen = WorldToScreenPoint(paperCenter.Value);
+                if (paperScreen != null)
+                    return paperScreen;
+                var fallbackScreen = WorldToScreenPointWithCamera((paperCenter.Value.x, paperCenter.Value.y, 0f));
+                if (fallbackScreen != null)
+                    return fallbackScreen;
+                return ToScreenPosition(paperCenter.Value, GetScreenDimension("width"), GetScreenDimension("height"));
+            }
+
+            var paperGo = GetInteractableGameObject(interactable);
+            var paperBounds = paperGo != null ? GetColliderBoundsCenterFromGameObject(paperGo) : null;
+            if (paperBounds != null)
+            {
+                var paperBoundsScreen = WorldToScreenPoint(paperBounds.Value);
+                if (paperBoundsScreen != null)
+                    return paperBoundsScreen;
+                var fallbackScreen = WorldToScreenPointWithCamera((paperBounds.Value.x, paperBounds.Value.y, 0f));
+                if (fallbackScreen != null)
+                    return fallbackScreen;
+                return ToScreenPosition(paperBounds.Value, GetScreenDimension("width"), GetScreenDimension("height"));
+            }
+
+            var paperPos = paperGo != null ? GetTransformPosition(paperGo) : null;
+            if (paperPos != null)
+            {
+                var paperPosScreen = WorldToScreenPoint(paperPos.Value);
+                if (paperPosScreen != null)
+                    return paperPosScreen;
+                var fallbackScreen = WorldToScreenPointWithCamera((paperPos.Value.x, paperPos.Value.y, 0f));
+                if (fallbackScreen != null)
+                    return fallbackScreen;
+                return ToScreenPosition(paperPos.Value, GetScreenDimension("width"), GetScreenDimension("height"));
+            }
+
+            foreach (var fieldName in new[] { "PositionDesktop", "OriginPosition", "PositionFocus" })
+            {
+                var fieldValue = GetMemberValue(interactable, fieldName);
+                var vector3 = GetVector3FromValue(fieldValue);
+                if (vector3 != null)
+                {
+                    var vector3Screen = WorldToScreenPoint(vector3.Value);
+                    if (vector3Screen != null)
+                        return vector3Screen;
+                    var fallbackScreen = WorldToScreenPointWithCamera((vector3.Value.x, vector3.Value.y, vector3.Value.z));
+                    if (fallbackScreen != null)
+                        return fallbackScreen;
+                    var vector2Fallback = (vector3.Value.x, vector3.Value.y);
+                    return ToScreenPosition(vector2Fallback, GetScreenDimension("width"), GetScreenDimension("height"));
+                }
+            }
+
+            MelonLoader.MelonLogger.Msg($"Paperwork screen position failed: collider={(paperCollider != null)}, center={(paperCenter != null)}, go={(paperGo != null)}, bounds={(paperBounds != null)}, pos={(paperPos != null)}");
+        }
+        else if (interactable != null && string.Equals(interactable.GetType().Name, "Paperwork", StringComparison.Ordinal))
+        {
+            MelonLoader.MelonLogger.Msg($"Paperwork not recognized. _paperworkType null={_paperworkType == null}, isInstance={(_paperworkType != null && _paperworkType.IsInstanceOfType(interactable))}");
+        }
+
         var gameObject = GetInteractableGameObject(interactable);
         var width = GetScreenDimension("width");
         var height = GetScreenDimension("height");
@@ -3796,12 +5060,27 @@ public sealed class UiNavigationHandler
         if (position == null && gameObject != null)
             position = GetRendererBoundsCenterFromGameObject(gameObject);
 
+        if (position == null && IsDrawer(interactable))
+        {
+            var drawerCollider = GetMemberValue(interactable, "Collider");
+            var drawerCenter = GetColliderBoundsCenter(drawerCollider);
+            if (drawerCenter != null)
+                position = drawerCenter;
+        }
+
         if (position == null)
+        {
+            if (IsDrawer(interactable))
+                MelonLoader.MelonLogger.Msg("Drawer screen position failed.");
             return null;
+        }
 
         var screen = WorldToScreenPoint(position.Value);
         if (screen != null)
             return screen;
+        var instanceScreen = WorldToScreenPointWithCamera((position.Value.x, position.Value.y, 0f));
+        if (instanceScreen != null)
+            return instanceScreen;
 
         if (gameObject != null)
         {
@@ -4123,6 +5402,49 @@ public sealed class UiNavigationHandler
         return WorldToScreenPoint((world.x, world.y, 0f));
     }
 
+    private (float x, float y)? WorldToScreenPointWithCamera((float x, float y, float z) world)
+    {
+        var camera = GetMainCamera() ?? GetAnyCamera();
+        if (camera == null)
+            return null;
+
+        try
+        {
+            var method = camera.GetType().GetMethod("WorldToScreenPoint", BindingFlags.Instance | BindingFlags.Public, null, new[] { _vector3Type ?? TypeResolver.Get("UnityEngine.Vector3") }, null);
+            if (method == null)
+                return null;
+
+            var vector3Type = _vector3Type ?? TypeResolver.Get("UnityEngine.Vector3");
+            if (vector3Type == null)
+                return null;
+
+            var ctor = vector3Type.GetConstructor(new[] { typeof(float), typeof(float), typeof(float) });
+            if (ctor == null)
+                return null;
+
+            var vector = ctor.Invoke(new object[] { world.x, world.y, world.z });
+            var result = method.Invoke(camera, new[] { vector });
+            if (result == null)
+                return null;
+
+            var xProp = result.GetType().GetProperty("x", BindingFlags.Instance | BindingFlags.Public);
+            var yProp = result.GetType().GetProperty("y", BindingFlags.Instance | BindingFlags.Public);
+            if (xProp == null || yProp == null)
+                return null;
+
+            var xVal = xProp.GetValue(result);
+            var yVal = yProp.GetValue(result);
+            if (xVal is float x && yVal is float y)
+                return (x, y);
+        }
+        catch
+        {
+            return null;
+        }
+
+        return null;
+    }
+
     private void SetInteractableFocus(object interactable)
     {
         if (interactable == null)
@@ -4354,6 +5676,44 @@ public sealed class UiNavigationHandler
 
         var itemName = GetMemberValue(itemDataObj, "item_name") as string;
         return SanitizeHoverText(itemName);
+    }
+
+    private bool IsShopItem(object interactable)
+    {
+        if (interactable == null)
+            return false;
+
+        return string.Equals(interactable.GetType().Name, "ShopItem", StringComparison.Ordinal);
+    }
+
+    private bool IsShopItemOwned(object interactable)
+    {
+        if (!IsShopItem(interactable))
+            return true;
+
+        try
+        {
+            var itemData = GetMemberValue(interactable, "ItemData");
+            if (itemData == null)
+                return false;
+
+            var template = GetMemberValue(itemData, "Template");
+            var itemDataObj = GetMemberValue(template, "item_data");
+            var variable = GetMemberValue(itemDataObj, "item_variable");
+            if (variable == null)
+                return false;
+
+            var method = variable.GetType().GetMethod("CallScript", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            var result = method.Invoke(variable, null);
+            return result is bool owned && owned;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private string GetShopItemPriceText(object interactable)
@@ -5041,13 +6401,6 @@ public sealed class UiNavigationHandler
         {
             return false;
         }
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
     }
 
     private enum NavigationDirection
