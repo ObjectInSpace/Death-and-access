@@ -29,6 +29,7 @@ public sealed class UiNavigationHandler
     private Type _grimDeskType;
     private Type _grimDeskDrawerType;
     private Type _deskItemType;
+    private Type _shopItemType;
     private Type _faxMachineType;
     private Type _spinnerType;
     private Type _catToyType;
@@ -1520,6 +1521,7 @@ public sealed class UiNavigationHandler
         _grimDeskType ??= TypeResolver.Get("GrimDesk");
         _grimDeskDrawerType ??= TypeResolver.Get("GrimDeskDrawer");
         _deskItemType ??= TypeResolver.Get("DeskItem");
+        _shopItemType ??= TypeResolver.Get("ShopItem");
         _faxMachineType ??= TypeResolver.Get("FaxMachine");
         _spinnerType ??= TypeResolver.Get("Spinner");
         _catToyType ??= TypeResolver.Get("CatToy");
@@ -5227,6 +5229,12 @@ public sealed class UiNavigationHandler
             SetUiSelected(interactable);
         }
         var hoverText = GetHoverText(interactable);
+        if (string.IsNullOrWhiteSpace(hoverText))
+        {
+            var shopItem = ResolveShopItem(interactable);
+            if (shopItem != null)
+                hoverText = GetHoverText(shopItem);
+        }
         UpdateHudHoverText(hoverText);
         AnnounceHoverText(hoverText, interactable);
     }
@@ -5305,9 +5313,20 @@ public sealed class UiNavigationHandler
         if (_screenreader == null)
             return;
 
-        var shopName = GetShopItemName(interactable);
+        var shopItem = ResolveShopItem(interactable) ?? interactable;
+        var shopDescription = GetShopItemDescription(shopItem);
+        var shopName = GetShopItemName(shopItem);
         var name = SanitizeHoverText(GetGameObjectName(interactable));
         hoverText = SanitizeHoverText(hoverText);
+        shopDescription = SanitizeHoverText(shopDescription);
+
+        if (!string.IsNullOrWhiteSpace(shopDescription))
+        {
+            if (string.IsNullOrWhiteSpace(hoverText))
+                hoverText = shopDescription;
+            else if (hoverText.IndexOf(shopDescription, StringComparison.OrdinalIgnoreCase) < 0)
+                hoverText = $"{shopDescription}. {hoverText}";
+        }
 
         if (!string.IsNullOrWhiteSpace(shopName))
         {
@@ -5318,7 +5337,7 @@ public sealed class UiNavigationHandler
             name = null;
         }
 
-        var shopPrice = GetShopItemPriceText(interactable);
+        var shopPrice = GetShopItemPriceText(shopItem);
         if (!string.IsNullOrWhiteSpace(shopPrice))
         {
             if (string.IsNullOrWhiteSpace(hoverText))
@@ -5355,6 +5374,42 @@ public sealed class UiNavigationHandler
             return;
 
         _screenreader.Announce(hoverText);
+
+        if (shopItem != null)
+            LogShopItemDebug(shopItem, hoverText);
+    }
+
+    private int _nextShopLogTick;
+
+    private void LogShopItemDebug(object shopItem, string hoverText)
+    {
+        if (shopItem == null)
+            return;
+
+        var now = Environment.TickCount;
+        if (now < _nextShopLogTick)
+            return;
+
+        _nextShopLogTick = now + 1500;
+
+        try
+        {
+            var itemData = GetMemberValue(shopItem, "ItemData") ?? GetMemberValue(shopItem, "itemData");
+            var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
+            var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
+            var source = itemDataObj ?? itemData;
+
+            var desc = GetShopItemDescription(shopItem);
+            var name = GetShopItemName(shopItem);
+            var price = GetShopItemPriceText(shopItem);
+
+            MelonLoader.MelonLogger.Msg(
+                $"Shop debug: name='{name ?? ""}', desc='{desc ?? ""}', price='{price ?? ""}', hover='{hoverText ?? ""}', dataType='{source?.GetType().Name ?? "null"}', templateType='{template?.GetType().Name ?? "null"}'");
+        }
+        catch
+        {
+            // Ignore.
+        }
     }
 
     private string GetCalendarDayText(object interactable)
@@ -5413,8 +5468,7 @@ public sealed class UiNavigationHandler
         if (interactable == null)
             return null;
 
-        var type = interactable.GetType();
-        if (!string.Equals(type.Name, "ShopItem", StringComparison.Ordinal))
+        if (!IsShopItem(interactable))
             return null;
 
         var itemData = GetMemberValue(interactable, "ItemData");
@@ -5476,13 +5530,12 @@ public sealed class UiNavigationHandler
         if (interactable == null)
             return null;
 
-        var type = interactable.GetType();
-        if (!string.Equals(type.Name, "ShopItem", StringComparison.Ordinal))
+        if (!IsShopItem(interactable))
             return null;
 
         try
         {
-            var method = type.GetMethod("GetPrice", BindingFlags.Instance | BindingFlags.Public);
+            var method = interactable.GetType().GetMethod("GetPrice", BindingFlags.Instance | BindingFlags.Public);
             if (method == null)
                 return null;
 
@@ -5500,6 +5553,103 @@ public sealed class UiNavigationHandler
         }
 
         return null;
+    }
+
+    private string GetShopItemDescription(object interactable)
+    {
+        if (interactable == null || !IsShopItem(interactable))
+            return null;
+
+        var itemData = GetMemberValue(interactable, "ItemData") ?? GetMemberValue(interactable, "itemData");
+        var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
+        var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
+        var source = itemDataObj ?? itemData;
+
+        if (source != null)
+        {
+            foreach (var field in new[] { "item_description", "item_desc", "description", "desc", "itemDescription", "itemDesc" })
+            {
+                var value = GetMemberValue(source, field) as string;
+                value = SanitizeHoverText(value);
+                if (!string.IsNullOrWhiteSpace(value) && IsShopDescriptionCandidate(value))
+                    return value;
+            }
+        }
+
+        var gameObject = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
+        var text = FindFirstUsefulTextInChildren(gameObject);
+        if (!string.IsNullOrWhiteSpace(text) && IsShopDescriptionCandidate(text))
+            return text;
+
+        return null;
+    }
+
+    private bool IsShopDescriptionCandidate(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var value = text.Trim();
+        if (LooksLikeValueText(value))
+            return false;
+
+        if (value.IndexOf("price", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        if (value.IndexOf("need", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        if (value.IndexOf("money", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        if (value.IndexOf("required", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+
+        return true;
+    }
+
+    private bool IsShopItem(object interactable)
+    {
+        return _shopItemType != null && interactable != null && _shopItemType.IsInstanceOfType(interactable);
+    }
+
+    private object ResolveShopItem(object interactable)
+    {
+        if (interactable == null)
+            return null;
+
+        if (IsShopItem(interactable))
+            return interactable;
+
+        if (_shopItemType == null)
+            return null;
+
+        var gameObject = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
+        if (gameObject == null)
+            return null;
+
+        try
+        {
+            var getComponentInParent = gameObject.GetType().GetMethod("GetComponentInParent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            if (getComponentInParent != null)
+            {
+                var parent = getComponentInParent.Invoke(gameObject, new object[] { _shopItemType });
+                if (parent != null)
+                    return parent;
+            }
+
+            var getComponentInChildren = gameObject.GetType().GetMethod("GetComponentInChildren", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            if (getComponentInChildren != null)
+            {
+                var child = getComponentInChildren.Invoke(gameObject, new object[] { _shopItemType });
+                if (child != null)
+                    return child;
+            }
+
+            var getComponent = gameObject.GetType().GetMethod("GetComponent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            return getComponent?.Invoke(gameObject, new object[] { _shopItemType });
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static object GetMemberValue(object instance, string name)
