@@ -574,11 +574,6 @@ public sealed class UiNavigationHandler
         if (GetKeyDown("RightBracket"))
             return ActivateDrawer("Right");
 
-        if (GetKeyDown("L"))
-            return TryMarkFocusedPaperwork(live: true);
-        if (GetKeyDown("D"))
-            return TryMarkFocusedPaperwork(live: false);
-
         return false;
     }
 
@@ -887,10 +882,16 @@ public sealed class UiNavigationHandler
 
     private bool TryHandlePaperworkShortcut()
     {
+        var ctrlHeld = GetKey("LeftControl") || GetKey("RightControl");
+        var cmdHeld = GetKey("LeftCommand") || GetKey("RightCommand");
+        var altHeld = GetKey("LeftAlt") || GetKey("RightAlt") || GetKey("LeftOption") || GetKey("RightOption");
+        var spareHeld = ctrlHeld || cmdHeld;
         for (var i = 1; i <= 9; i++)
         {
             if (GetKeyDown("Alpha" + i))
             {
+                if (spareHeld || altHeld)
+                    return TryMarkPaperworkByIndex(i - 1, live: spareHeld && !altHeld);
                 if (!TrySetPaperworkShortcutScreenPos(i - 1))
                     return false;
                 var paperwork = GetPaperworkByIndex(i - 1);
@@ -900,6 +901,8 @@ public sealed class UiNavigationHandler
 
         if (GetKeyDown("Alpha0"))
         {
+            if (spareHeld || altHeld)
+                return TryMarkPaperworkByIndex(9, live: spareHeld && !altHeld);
             if (!TrySetPaperworkShortcutScreenPos(9))
                 return false;
             var paperwork = GetPaperworkByIndex(9);
@@ -1052,6 +1055,19 @@ public sealed class UiNavigationHandler
             return false;
 
         var paperwork = GetFocusedPaperwork();
+        if (paperwork == null)
+            return false;
+
+        var mark = GetMemberValue(paperwork, live ? "MarkLive" : "MarkDie");
+        return TriggerInteractable(mark);
+    }
+
+    private bool TryMarkPaperworkByIndex(int index, bool live)
+    {
+        if (!IsMarkerHeld())
+            return false;
+
+        var paperwork = GetPaperworkByIndex(index);
         if (paperwork == null)
             return false;
 
