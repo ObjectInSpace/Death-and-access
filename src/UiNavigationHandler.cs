@@ -571,11 +571,6 @@ public sealed class UiNavigationHandler
         if (GetKeyDown("RightBracket"))
             return ActivateDrawer("Right");
 
-        if (GetKeyDown("L"))
-            return TryMarkFocusedPaperwork(live: true);
-        if (GetKeyDown("D"))
-            return TryMarkFocusedPaperwork(live: false);
-
         return false;
     }
 
@@ -916,22 +911,60 @@ public sealed class UiNavigationHandler
 
     private bool TryHandlePaperworkShortcut()
     {
+        var index = GetNumberRowIndexDown();
+        if (index < 0)
+            return false;
+
+        var ctrlOrCommand = IsCtrlOrCommandHeld();
+        var altOrOption = IsAltOrOptionHeld();
+        if (ctrlOrCommand || altOrOption)
+        {
+            if (!IsMarkerHeld())
+                return true;
+
+            var markLive = ctrlOrCommand && !altOrOption;
+            var markDie = altOrOption && !ctrlOrCommand;
+            if (!markLive && !markDie)
+                return true;
+
+            var paperwork = GetPaperworkByIndex(index);
+            if (paperwork == null)
+                return true;
+
+            var mark = GetMemberValue(paperwork, markLive ? "MarkLive" : "MarkDie");
+            return ActivateInteractableWithFocus(mark);
+        }
+
+        var selected = GetPaperworkByIndex(index);
+        return ActivateInteractableWithFocus(selected);
+    }
+
+    private int GetNumberRowIndexDown()
+    {
         for (var i = 1; i <= 9; i++)
         {
             if (GetKeyDown("Alpha" + i))
-            {
-                var paperwork = GetPaperworkByIndex(i - 1);
-                return ActivateInteractableWithFocus(paperwork);
-            }
+                return i - 1;
         }
 
         if (GetKeyDown("Alpha0"))
-        {
-            var paperwork = GetPaperworkByIndex(9);
-            return ActivateInteractableWithFocus(paperwork);
-        }
+            return 9;
 
-        return false;
+        return -1;
+    }
+
+    private bool IsCtrlOrCommandHeld()
+    {
+        return GetKey("LeftControl")
+               || GetKey("RightControl")
+               || GetKey("LeftCommand")
+               || GetKey("RightCommand");
+    }
+
+    private bool IsAltOrOptionHeld()
+    {
+        return GetKey("LeftAlt")
+               || GetKey("RightAlt");
     }
 
     private bool ActivateStaticInteractable(Type type)
