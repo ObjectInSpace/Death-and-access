@@ -8,6 +8,10 @@ using System.Runtime.CompilerServices;
 public class SpecificTextAnnouncer
 {
     private readonly ConditionalWeakTable<object, LastTextHolder> _lastByComponent = new();
+    private string _lastMoneyNotifyText;
+    private bool _moneyNotifyVisible;
+    private int _lastMoneyNotifyTick;
+    private bool _suppressMoneyNotifications;
     private readonly ConditionalWeakTable<object, FocusState> _focusByRoot = new();
     private readonly ConditionalWeakTable<object, CoinState> _coinStates = new();
     private ScreenreaderProvider _screenreader;
@@ -24,6 +28,7 @@ public class SpecificTextAnnouncer
     private Type _saveManagerType;
     private Type _articyGlobalVariablesType;
     private Type _deskLampType;
+    private Type _moneyNotificationType;
     private Type _resourcesType;
     private MethodInfo _findObjectsOfTypeMethod;
     private MethodInfo _findObjectsOfTypeAllMethod;
@@ -31,6 +36,8 @@ public class SpecificTextAnnouncer
     private object _lastHoveredGameObject;
     private LampState _deskLampState;
     private string _lastSceneName;
+    private string _lastShopHoverText;
+    private string _lastMouseHoverText;
 
     public void Initialize(ScreenreaderProvider screenreader)
     {
@@ -49,6 +56,7 @@ public class SpecificTextAnnouncer
 
         var sceneChanged = !string.Equals(sceneName, _lastSceneName, StringComparison.Ordinal);
         _lastSceneName = sceneName;
+        _suppressMoneyNotifications = string.Equals(sceneName, "Elevator", StringComparison.OrdinalIgnoreCase);
 
         if (IsIntroOrComicScene(sceneName))
         {
@@ -84,6 +92,8 @@ public class SpecificTextAnnouncer
             AnnounceCurrentSelection();
         if (!suppressHover)
             AnnounceCurrentHover();
+        if (!suppressHover)
+            AnnounceMouseHover();
 
     }
 
@@ -107,6 +117,7 @@ public class SpecificTextAnnouncer
         _saveManagerType ??= TypeResolver.Get("SaveManager");
         _articyGlobalVariablesType ??= TypeResolver.Get("Articy.Project_Of_Death.GlobalVariables.ArticyGlobalVariables");
         _deskLampType ??= TypeResolver.Get("DeskLamp");
+        _moneyNotificationType ??= TypeResolver.Get("MoneyNotification");
         _resourcesType ??= TypeResolver.Get("UnityEngine.Resources");
         _findObjectsOfTypeMethod ??= _unityObjectType?.GetMethod(
             "FindObjectsOfType",
@@ -146,9 +157,25 @@ public class SpecificTextAnnouncer
 
         ProcessRoot(instance, IsHudFocused, force =>
         {
-            AnnounceComponent(GetFieldValue(instance, "TextHover"), null, force);
-            AnnounceShopHover(GetFieldValue(instance, "TextHoverShop"), force);
-            AnnounceComponent(GetFieldValue(instance, "TextMoney"), null, force);
+            var hover = GetFieldValue(instance, "TextHover");
+            var hoverShop = GetFieldValue(instance, "TextHoverShop");
+            var money = GetFieldValue(instance, "TextMoney");
+
+            var hoverText = GetTextValue(hover);
+            var hoverShopText = GetTextValue(hoverShop);
+
+            if (!((IsShopActive() || IsElevatorSceneActive()) && IsLikelyValueText(hoverText)))
+                AnnounceComponent(hover, null, force);
+
+            if (!((IsShopActive() || IsElevatorSceneActive()) && IsLikelyValueText(hoverShopText)))
+                AnnounceShopHover(hoverShop, force);
+
+            if (IsShopActive() && !string.IsNullOrWhiteSpace(hoverShopText))
+                return;
+
+            var moneyText = GetTextValue(money);
+            if (!((IsShopActive() || IsElevatorSceneActive()) && IsLikelyValueText(moneyText)))
+                AnnounceComponent(money, null, force);
         });
     }
 
@@ -156,6 +183,28 @@ public class SpecificTextAnnouncer
     {
         if (hoverComponent == null)
             return;
+
+        if (!IsComponentInActiveScene(hoverComponent))
+            return;
+
+        if (IsShopActive())
+        {
+            var combined = BuildShopHoverText(hoverComponent);
+            if (!string.IsNullOrWhiteSpace(combined))
+            {
+                var normalized = NormalizeShopHoverText(combined);
+                if (string.IsNullOrWhiteSpace(normalized))
+                    return;
+
+                if (string.Equals(_lastShopHoverText, normalized, StringComparison.Ordinal))
+                    return;
+
+                _lastShopHoverText = normalized;
+                AnnounceContent(normalized, priority: false);
+                return;
+            }
+            _lastShopHoverText = null;
+        }
 
         var text = GetTextValue(hoverComponent);
         if (string.Equals(text, "shop item template", StringComparison.OrdinalIgnoreCase))
@@ -169,6 +218,175 @@ public class SpecificTextAnnouncer
         }
 
         AnnounceComponent(hoverComponent, null, force);
+    }
+
+    private string BuildShopHoverText(object hoverComponent)
+    {
+        var description = GetTextValue(hoverComponent);
+        description = TextSanitizer.StripRichTextTags(description)?.Trim();
+
+        var shopName = GetShopItemNameText();
+        var shopPrice = GetShopItemPriceText();
+
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(shopName))
+            parts.Add(shopName);
+        if (!string.IsNullOrWhiteSpace(description))
+            parts.Add(description);
+        if (!string.IsNullOrWhiteSpace(shopPrice))
+            parts.Add(shopPrice);
+
+        return parts.Count == 0 ? null : string.Join(". ", parts);
+    }
+
+    private string NormalizeShopHoverText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        var trimmed = text.Trim();
+        var builder = new System.Text.StringBuilder(trimmed.Length);
+        var lastWasSpace = false;
+        foreach (var ch in trimmed)
+        {
+            if (char.IsWhiteSpace(ch))
+            {
+                if (lastWasSpace)
+                    continue;
+                builder.Append(' ');
+                lastWasSpace = true;
+            }
+            else
+            {
+                builder.Append(ch);
+                lastWasSpace = false;
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private string GetShopItemNameText()
+    {
+        if (_shopType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textNameField = _shopType.GetField("TextName", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textName = textNameField?.GetValue(instance);
+            return GetTextValue(textName);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string GetShopItemPriceText()
+    {
+        if (_shopType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textPriceField = _shopType.GetField("TextPrice", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textPrice = textPriceField?.GetValue(instance);
+            var raw = GetTextValue(textPrice);
+            if (string.IsNullOrWhiteSpace(raw))
+                return null;
+
+            return "Price " + raw.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private bool IsShopActive()
+    {
+        if (_shopType == null)
+            return false;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return false;
+
+            if (!ReflectionUtils.TryGetProperty(instance.GetType(), instance, "gameObject", out var go))
+                return true;
+
+            return go == null || IsGameObjectActive(go);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsElevatorSceneActive()
+    {
+        var elevatorManager = GetStaticInstance("ElevatorManager");
+        if (elevatorManager == null)
+            return false;
+
+        try
+        {
+            var method = elevatorManager.GetType().GetMethod("GetCurrentScene", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            var scene = method.Invoke(elevatorManager, null);
+            return scene != null && string.Equals(scene.ToString(), "Elevator", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsLikelyValueText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var trimmed = text.Trim();
+        var digits = 0;
+        var nonDigits = 0;
+        foreach (var ch in trimmed)
+        {
+            if (char.IsDigit(ch))
+            {
+                digits++;
+                continue;
+            }
+
+            if (ch == '.' || ch == ',' || ch == '-' || ch == '$' || ch == '+')
+                continue;
+
+            if (char.IsWhiteSpace(ch))
+                continue;
+
+            nonDigits++;
+        }
+
+        if (nonDigits > 0)
+            return false;
+
+        return digits > 0;
     }
 
     private string GetShopDisplayName()
@@ -1076,6 +1294,22 @@ public class SpecificTextAnnouncer
         AnnounceTextComponents(current, null, force: true);
     }
 
+    private void AnnounceMouseHover()
+    {
+        var nav = UiNavigationHandler.Instance;
+        if (nav == null)
+            return;
+
+        if (nav.TryGetMouseHoverText(out var text))
+        {
+            if (string.Equals(_lastMouseHoverText, text, StringComparison.Ordinal))
+                return;
+
+            _lastMouseHoverText = text;
+            AnnounceContent(text, priority: false);
+        }
+    }
+
     private object GetCurrentEventSystem()
     {
         if (_eventSystemType == null)
@@ -1711,6 +1945,9 @@ public class SpecificTextAnnouncer
         if (component == null)
             return;
 
+        if (!IsComponentInActiveScene(component))
+            return;
+
         if (excludedNames != null)
         {
             var name = GetObjectName(component);
@@ -1734,6 +1971,45 @@ public class SpecificTextAnnouncer
             text = fallback;
         }
 
+        if (IsElevatorSceneActive() && IsMoneyNotificationText(text) && !IsMoneyNotificationComponent(component))
+            return;
+
+        if (IsElevatorSceneActive() && IsMoneyNotificationText(text))
+            return;
+
+        if (IsMoneyNotificationComponent(component) || (IsElevatorSceneActive() && IsMoneyNotificationText(text)))
+        {
+            if (_suppressMoneyNotifications)
+                return;
+
+            var normalized = TextSanitizer.StripRichTextTags(text)?.Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+                return;
+
+            if (!IsVisible(component))
+            {
+                _moneyNotifyVisible = false;
+                return;
+            }
+
+            var now = Environment.TickCount;
+            var changed = !string.Equals(_lastMoneyNotifyText, normalized, StringComparison.Ordinal);
+            if (!_moneyNotifyVisible || changed)
+            {
+                if (now - _lastMoneyNotifyTick > 500)
+                {
+                    _moneyNotifyVisible = true;
+                    _lastMoneyNotifyText = normalized;
+                    _lastMoneyNotifyTick = now;
+                    AnnounceContent(normalized, priority: false);
+                }
+            }
+            return;
+        }
+
+        if (IsElevatorSceneActive() && IsLikelyValueText(text))
+            return;
+
         if (!ignoreVisibility && !IsVisible(component))
             return;
 
@@ -1743,6 +2019,130 @@ public class SpecificTextAnnouncer
 
         holder.Text = text;
         AnnounceContent(text, priority: false);
+    }
+
+    private bool IsMoneyNotificationComponent(object component)
+    {
+        if (_moneyNotificationType == null || component == null)
+            return false;
+
+        if (component.GetType() == _moneyNotificationType)
+            return true;
+
+        if (ReflectionUtils.TryGetProperty(component.GetType(), component, "gameObject", out var gameObject) && gameObject != null)
+        {
+            var method = gameObject.GetType().GetMethod(
+                "GetComponentInParent",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(Type), typeof(bool) },
+                null);
+
+            if (method != null)
+            {
+                var parent = method.Invoke(gameObject, new object[] { _moneyNotificationType, true });
+                if (parent != null)
+                    return true;
+            }
+
+            method = gameObject.GetType().GetMethod(
+                "GetComponentInParent",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(Type) },
+                null);
+
+            return method?.Invoke(gameObject, new object[] { _moneyNotificationType }) != null;
+        }
+
+        return false;
+    }
+
+    private bool IsComponentInActiveScene(object component)
+    {
+        if (component == null)
+            return false;
+
+        if (!TryGetCurrentSceneName(out var sceneName) || string.IsNullOrWhiteSpace(sceneName))
+            return true;
+
+        try
+        {
+            if (!ReflectionUtils.TryGetProperty(component.GetType(), component, "gameObject", out var gameObject) || gameObject == null)
+                return true;
+
+            var sceneProp = gameObject.GetType().GetProperty("scene", BindingFlags.Instance | BindingFlags.Public);
+            var scene = sceneProp?.GetValue(gameObject);
+            if (scene == null)
+                return true;
+
+            var nameProp = scene.GetType().GetProperty("name", BindingFlags.Instance | BindingFlags.Public);
+            var name = nameProp?.GetValue(scene) as string;
+            if (string.IsNullOrWhiteSpace(name))
+                return true;
+
+            return string.Equals(name, sceneName, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private bool IsMoneyComponent(object component)
+    {
+        var name = GetObjectName(component);
+        if (ContainsMoneyToken(name))
+            return true;
+
+        if (ReflectionUtils.TryGetProperty(component.GetType(), component, "gameObject", out var gameObject) && gameObject != null)
+        {
+            name = GetObjectName(gameObject);
+            if (ContainsMoneyToken(name))
+                return true;
+
+            if (ReflectionUtils.TryGetProperty(gameObject.GetType(), gameObject, "transform", out var transform) && transform != null
+                && ReflectionUtils.TryGetProperty(transform.GetType(), transform, "parent", out var parent) && parent != null)
+            {
+                name = GetObjectName(parent);
+                if (ContainsMoneyToken(name))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool ContainsMoneyToken(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return false;
+
+        return name.IndexOf("money", StringComparison.OrdinalIgnoreCase) >= 0
+               || name.IndexOf("textmoney", StringComparison.OrdinalIgnoreCase) >= 0
+               || name.IndexOf("moneytext", StringComparison.OrdinalIgnoreCase) >= 0
+               || name.IndexOf("moneynotification", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private bool IsMoneyNotificationText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var trimmed = text.Trim();
+        if (trimmed.StartsWith("+", StringComparison.Ordinal) || trimmed.StartsWith("-", StringComparison.Ordinal))
+            trimmed = trimmed.Substring(1).TrimStart();
+
+        if (trimmed.Length == 0)
+            return false;
+
+        foreach (var ch in trimmed)
+        {
+            if (!char.IsDigit(ch))
+                return false;
+        }
+
+        return true;
     }
 
     private void AnnounceContent(string text, bool priority)
@@ -2357,6 +2757,7 @@ public class SpecificTextAnnouncer
     {
         public string Text;
     }
+
 
     private sealed class FocusState
     {

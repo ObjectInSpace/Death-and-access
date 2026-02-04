@@ -1,24 +1,27 @@
 namespace Death_and_Access;
-
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Linq;
 using System.Runtime.CompilerServices;
 
 public sealed class UiNavigationHandler
 {
     private const int AxisRepeatMs = 150;
     private const float AxisDeadzone = 0.5f;
-    
+    private const int PointerStep = 24;
     private Type _inputType;
     private Type _keyCodeType;
     private Type _textType;
     private Type _tmpTextType;
+    private Type _tmpTextMeshType;
     private Type _interactableType;
     private Type _inputManagerType;
     private Type _hudManagerType;
     private Type _cameraType;
     private Type _screenType;
+    private Type _sceneManagerType;
+    private Type _sceneType;
     private Type _vector3Type;
     private Type _vector2Type;
     private Type _physics2DType;
@@ -27,6 +30,11 @@ public sealed class UiNavigationHandler
     private Type _grimDeskType;
     private Type _grimDeskDrawerType;
     private Type _deskItemType;
+    private Type _shopItemType;
+    private Type _shopType;
+    private Type _shopManagerType;
+    private Type _elevatorType;
+    private Type _eSceneType;
     private Type _faxMachineType;
     private Type _spinnerType;
     private Type _catToyType;
@@ -73,10 +81,33 @@ public sealed class UiNavigationHandler
     private Type _demoEndScreenType;
     private Type _comicManagerType;
     private Type _unityObjectType;
+    private Type _gameObjectType;
+    private Type _transformType;
+    private Type _canvasScalerType;
+    private Type _graphicRaycasterType;
+    private Type _imageType;
+    private Type _spriteType;
+    private Type _texture2DType;
+    private Type _colorType;
+    private Type _rectType;
+    private Type _renderModeType;
+    private Type _cursorType;
+    private Type _articyGlobalVariablesType;
     private MethodInfo _getKeyDownMethod;
     private MethodInfo _getKeyMethod;
     private MethodInfo _getAxisRawMethod;
     private MethodInfo _findObjectsOfTypeMethod;
+    private object _virtualCursorCanvas;
+    private object _virtualCursorImage;
+    private object _virtualCursorRectTransform;
+    private object _virtualCursorTexture;
+    private object _virtualCursorSprite;
+    private float _virtualCursorTextureWidth;
+    private float _virtualCursorTextureHeight;
+    private (float x, float y)? _lastRawMousePos;
+    private bool _virtualCursorUsesFallback;
+    private bool _cursorHiddenForVirtual;
+    private (float x, float y)? _pendingShortcutScreenPos;
     private int _nextKeyTick;
     private bool _axisUpHeld;
     private bool _axisDownHeld;
@@ -91,48 +122,17 @@ public sealed class UiNavigationHandler
     private int _lastAxisTick;
     private float _cachedAxisX;
     private float _cachedAxisY;
-    private bool _virtualCursorInitialized;
-    private float _virtualCursorX;
-    private float _virtualCursorY;
-    private float _lastMouseX;
-    private float _lastMouseY;
     private int _lastSelectableCacheTick;
     private List<object> _cachedSelectables;
-    private object _pendingNavigationFocus;
     private int _keyboardNavUntilTick;
     private int _keyboardFocusUntilTick;
     private bool _keyboardFocusActive;
-    private bool _ignoreMouseUntilMove;
-    private int _raycastCacheTick;
-    private Dictionary<object, (float x, float y)> _raycastScreenCache;
-    private int _candidateCacheTick;
-    private int _candidateCacheWidth;
-    private int _candidateCacheHeight;
-    private bool _candidateCacheHitAnyCollider;
-    private List<(object target, (float x, float y) screen)> _candidateCache;
-
-    internal static UiNavigationHandler Instance { get; private set; }
-
-    internal static void ClearInstance()
-    {
-        Instance = null;
-    }
-
-    internal bool IsVirtualCursorActive => _virtualCursorInitialized && _keyboardFocusActive;
-
-    internal bool TryGetVirtualCursorPosition(out float x, out float y)
-    {
-        if (!IsVirtualCursorActive)
-        {
-            x = 0f;
-            y = 0f;
-            return false;
-        }
-
-        x = _virtualCursorX;
-        y = _virtualCursorY;
-        return true;
-    }
+    private bool _virtualCursorActive;
+    private (float x, float y) _virtualCursorPos;
+    private string _activeSceneName;
+    private string _elevatorSceneName;
+    private readonly HashSet<string> _allowedSceneNames = new(StringComparer.OrdinalIgnoreCase);
+    private bool _sceneChanging;
 
     public void Initialize(ScreenreaderProvider screenreader)
     {
@@ -140,9 +140,75 @@ public sealed class UiNavigationHandler
         _screenreader = screenreader;
     }
 
+    internal static UiNavigationHandler Instance { get; private set; }
+
+    internal bool IsVirtualCursorActive => _virtualCursorActive;
+
+    internal void SubmitInteractableFromVirtual()
+    {
+        SubmitInteractable();
+    }
+
+    internal static void ClearInstance()
+    {
+        Instance = null;
+    }
+
+    internal bool TryGetVirtualCursorPosition(out float x, out float y)
+    {
+        if (!_virtualCursorActive)
+        {
+            x = 0f;
+            y = 0f;
+            return false;
+        }
+
+        x = _virtualCursorPos.x;
+        y = _virtualCursorPos.y;
+        return true;
+    }
+
+    internal bool TryGetMouseHoverText(out string text)
+    {
+        text = null;
+        EnsureTypes();
+
+        object interactable = GetInputManagerLastHit();
+        if (interactable == null)
+        {
+            var raw = GetRawMousePosition();
+            if (raw == null)
+                return false;
+
+            interactable = GetInteractableAtScreenPosition(raw.Value.x, raw.Value.y);
+        }
+
+        if (interactable == null && IsShopActive())
+        {
+            var raw = GetRawMousePosition();
+            if (raw != null)
+                interactable = GetShopItemAtScreenPosition(raw.Value.x, raw.Value.y);
+        }
+
+        if (interactable == null)
+            return false;
+
+        var hoverText = GetHoverText(interactable);
+        if (string.IsNullOrWhiteSpace(hoverText))
+        {
+            var shopItem = ResolveShopItem(interactable);
+            if (shopItem != null)
+                hoverText = GetHoverText(shopItem);
+        }
+
+        text = BuildHoverText(interactable, hoverText);
+        return !string.IsNullOrWhiteSpace(text);
+    }
+
     public void Update()
     {
         EnsureTypes();
+        UpdateSceneFocusLock();
 
         if (IsSceneChanging())
             return;
@@ -163,26 +229,25 @@ public sealed class UiNavigationHandler
             _keyboardNavUntilTick = Environment.TickCount + 500;
             _keyboardFocusUntilTick = Environment.TickCount + 1500;
             _keyboardFocusActive = true;
-            _ignoreMouseUntilMove = true;
         }
 
         if (TryAdjustFocusedSlider(direction))
             return;
 
-        if (IsMenuActive() && direction != NavigationDirection.None)
+        if (IsMenuActive() && !IsOfficeActive() && direction != NavigationDirection.None)
         {
             _pendingEventSystemSyncUntil = Environment.TickCount + 250;
             TryMoveEventSystemSelection(direction);
         }
 
-        if (IsMenuActive())
+        if (IsMenuActive() && !IsOfficeActive())
         {
             if (submitInteractPressed)
                 SubmitInteractable();
             return;
         }
 
-        if (direction != NavigationDirection.None && ShouldDeferToEventSystem() && IsPointerOverUi())
+        if (direction != NavigationDirection.None && !IsOfficeActive() && ShouldDeferToEventSystem() && IsPointerOverUi())
         {
             _pendingEventSystemSyncUntil = Environment.TickCount + 250;
             if (TryMoveEventSystemSelection(direction))
@@ -190,7 +255,7 @@ public sealed class UiNavigationHandler
             ClearUiSelection();
         }
 
-        UpdateVirtualCursorFocus(direction, submitInteractPressed);
+        UpdateVirtualCursorFocus(direction, submitInteractPressed, axisX, axisY);
     }
 
     private bool TryHandleIntroSkip()
@@ -341,19 +406,10 @@ public sealed class UiNavigationHandler
         _lastEventSelected = GetInteractableGameObject(preferred) ?? preferred;
         SetInteractableFocus(preferred);
 
-        var position = GetInteractableScreenPosition(preferred);
-        if (position != null)
-        {
-            _virtualCursorX = position.Value.x;
-            _virtualCursorY = position.Value.y;
-            _virtualCursorInitialized = true;
-        }
-
         var now = Environment.TickCount;
         _keyboardNavUntilTick = now + 500;
         _keyboardFocusUntilTick = now + 1500;
         _keyboardFocusActive = true;
-        _ignoreMouseUntilMove = true;
     }
 
     private void EnsureMenuSelection()
@@ -383,19 +439,10 @@ public sealed class UiNavigationHandler
         _lastEventSelected = GetInteractableGameObject(preferred) ?? preferred;
         SetInteractableFocus(preferred);
 
-        var position = GetInteractableScreenPosition(preferred);
-        if (position != null)
-        {
-            _virtualCursorX = position.Value.x;
-            _virtualCursorY = position.Value.y;
-            _virtualCursorInitialized = true;
-        }
-
         var now = Environment.TickCount;
         _keyboardNavUntilTick = now + 500;
         _keyboardFocusUntilTick = now + 1500;
         _keyboardFocusActive = true;
-        _ignoreMouseUntilMove = true;
     }
 
     private object GetPreferredDialogSelectable()
@@ -582,6 +629,12 @@ public sealed class UiNavigationHandler
                 return true;
         }
 
+        if (IsShopSceneActive())
+        {
+            if (TryHandleShopNumberShortcut())
+                return true;
+        }
+
         if (GetKeyDown("M"))
             return AnnounceMoney();
 
@@ -617,6 +670,45 @@ public sealed class UiNavigationHandler
 
         var button = GetElevatorButtonByIndex(index);
         return ActivateInteractableWithFocus(button);
+    }
+
+    private bool TryHandleShopNumberShortcut()
+    {
+        if (!IsShopSceneActive())
+            return false;
+
+        var digit = GetNumberRowDigit();
+        if (digit < 1 || digit > 4)
+            return false;
+
+        if (digit == 4)
+        {
+            var back = FindElevatorButtonInScene("Elevator")
+                       ?? FindInteractableByHoverTextContains("elevator")
+                       ?? FindInteractableByHoverTextContains("back")
+                       ?? FindInteractableByNameContains("elevator")
+                       ?? FindInteractableByNameContains("ButtonElevator");
+            if (back == null)
+                back = GetElevatorButtonForScene("Elevator");
+            var result = ActivateInteractableWithFocus(back);
+            var interactResult = TryInvokeInteract(back);
+            if (!interactResult)
+                TryInvokeUiClick(back);
+            return result || interactResult;
+        }
+
+        var items = GetShopItemsOrdered();
+        var index = digit - 1;
+        if (index < 0 || index >= items.Count)
+            return false;
+
+        var target = items[index];
+        var ok = ActivateInteractableWithFocus(target);
+        if (TryInvokeInteract(target))
+            ok = true;
+        else
+            TryInvokeUiClick(target);
+        return ok;
     }
 
     private object GetElevatorButtonByIndex(int index)
@@ -760,6 +852,134 @@ public sealed class UiNavigationHandler
         return -1;
     }
 
+    private int GetNumberRowDigit()
+    {
+        for (var i = 1; i <= 4; i++)
+        {
+            if (GetKeyDown("Alpha" + i))
+                return i;
+        }
+
+        return -1;
+    }
+
+    private List<object> GetShopItemsOrdered()
+    {
+        var items = new List<object>();
+        if (_shopItemType == null)
+            return items;
+
+        try
+        {
+            if (_shopManagerType != null)
+            {
+                var manager = GetStaticInstance(_shopManagerType);
+                if (manager != null)
+                {
+                    var field = _shopManagerType.GetField("SpawnedItems", BindingFlags.Instance | BindingFlags.NonPublic);
+                    var list = field?.GetValue(manager) as System.Collections.IEnumerable;
+                    if (list != null)
+                    {
+                        foreach (var item in list)
+                        {
+                            if (item == null)
+                                continue;
+                            if (!IsInAllowedScene(item))
+                                continue;
+                            var go = GetGameObjectFromComponent(item) ?? GetMemberValue(item, "gameObject");
+                            if (go != null && !IsGameObjectActive(go))
+                                continue;
+                            items.Add(item);
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore and fall back.
+        }
+
+        if (items.Count == 0 && _shopType != null)
+        {
+            try
+            {
+                var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+                var instance = instanceField?.GetValue(null);
+                var shelf = instance != null ? GetMemberValue(instance, "Shelf") : null;
+                if (shelf != null)
+                {
+                    var method = shelf.GetType().GetMethod(
+                        "GetComponentsInChildren",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null,
+                        new[] { typeof(Type), typeof(bool) },
+                        null);
+
+                    var results = method?.Invoke(shelf, new object[] { _shopItemType, true }) as Array;
+                    if (results != null)
+                    {
+                        foreach (var item in results)
+                        {
+                            if (item == null)
+                                continue;
+                            if (!IsInAllowedScene(item))
+                                continue;
+                            var go = GetGameObjectFromComponent(item) ?? GetMemberValue(item, "gameObject");
+                            if (go != null && !IsGameObjectActive(go))
+                                continue;
+                            items.Add(item);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore and fall back.
+            }
+        }
+
+        if (items.Count == 0)
+        {
+            foreach (var item in FindSceneObjectsOfType(_shopItemType))
+            {
+                if (item == null)
+                    continue;
+
+                if (!IsInAllowedScene(item))
+                    continue;
+
+                var go = GetGameObjectFromComponent(item) ?? GetMemberValue(item, "gameObject");
+                if (go != null && !IsGameObjectActive(go))
+                    continue;
+
+                items.Add(item);
+            }
+        }
+
+        items.Sort((left, right) =>
+        {
+            var leftSlot = GetShopItemSlot(left);
+            var rightSlot = GetShopItemSlot(right);
+            var cmpSlot = leftSlot.CompareTo(rightSlot);
+            if (cmpSlot != 0)
+                return cmpSlot;
+
+            var leftPos = GetTransformPosition3(GetGameObjectFromComponent(left) ?? GetMemberValue(left, "gameObject"));
+            var rightPos = GetTransformPosition3(GetGameObjectFromComponent(right) ?? GetMemberValue(right, "gameObject"));
+            var leftX = leftPos?.x ?? 0f;
+            var rightX = rightPos?.x ?? 0f;
+            var cmp = leftX.CompareTo(rightX);
+            if (cmp != 0)
+                return cmp;
+            var leftY = leftPos?.y ?? 0f;
+            var rightY = rightPos?.y ?? 0f;
+            return rightY.CompareTo(leftY);
+        });
+
+        return items;
+    }
+
     private object GetDialogSelectableByIndex(int index)
     {
         if (index < 0)
@@ -855,9 +1075,154 @@ public sealed class UiNavigationHandler
         }
     }
 
+    private bool AnnounceMoney()
+    {
+        if (_hudManagerType == null)
+            return false;
+
+        var moneyValue = GetCurrentMoneyValue();
+        if (!string.IsNullOrWhiteSpace(moneyValue))
+        {
+            _screenreader?.Announce(moneyValue);
+            return true;
+        }
+
+        var instance = GetStaticInstance(_hudManagerType);
+        if (instance == null)
+            return false;
+
+        var textMoney = GetMemberValue(instance, "TextMoney");
+        if (textMoney == null)
+            return false;
+
+        var text = GetComponentText(textMoney, _tmpTextType) ?? GetComponentText(textMoney, _textType);
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        text = TextSanitizer.StripRichTextTags(text);
+        var cleaned = ExtractMoneyValue(text);
+        _screenreader?.Announce(string.IsNullOrWhiteSpace(cleaned) ? text.Trim() : cleaned);
+        return true;
+    }
+
+    private string GetCurrentMoneyValue()
+    {
+        if (_articyGlobalVariablesType == null)
+            return null;
+
+        try
+        {
+            var defaultProp = _articyGlobalVariablesType.GetProperty("Default", BindingFlags.Public | BindingFlags.Static);
+            var defaults = defaultProp?.GetValue(null);
+            if (defaults == null)
+                return null;
+
+            var inventory = GetMemberValue(defaults, "inventory");
+            if (inventory == null)
+                return null;
+
+            var money = GetMemberValue(inventory, "money");
+            if (money == null)
+                return null;
+
+            return money.ToString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string ExtractMoneyValue(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        var normalized = text.Replace("\r", "").Replace("\n", " ").Trim();
+        var eq = normalized.LastIndexOf('=');
+        if (eq >= 0 && eq + 1 < normalized.Length)
+            return normalized.Substring(eq + 1).Trim();
+
+        var digits = new string(normalized.Where(char.IsDigit).ToArray());
+        return string.IsNullOrWhiteSpace(digits) ? null : digits;
+    }
+
+
+    private bool TryHandlePaperworkShortcut()
+    {
+        var ctrlHeld = GetKey("LeftControl") || GetKey("RightControl");
+        var cmdHeld = GetKey("LeftCommand") || GetKey("RightCommand");
+        var altHeld = GetKey("LeftAlt") || GetKey("RightAlt") || GetKey("LeftOption") || GetKey("RightOption");
+        var spareHeld = ctrlHeld || cmdHeld;
+        for (var i = 1; i <= 9; i++)
+        {
+            if (GetKeyDown("Alpha" + i))
+            {
+                if (spareHeld || altHeld)
+                    return TryMarkPaperworkByIndex(i - 1, live: spareHeld && !altHeld);
+                if (!TrySetPaperworkShortcutScreenPos(i - 1))
+                    return false;
+                var paperwork = GetPaperworkByIndex(i - 1);
+                return ActivateInteractableWithFocus(paperwork);
+            }
+        }
+
+        if (GetKeyDown("Alpha0"))
+        {
+            if (spareHeld || altHeld)
+                return TryMarkPaperworkByIndex(9, live: spareHeld && !altHeld);
+            if (!TrySetPaperworkShortcutScreenPos(9))
+                return false;
+            var paperwork = GetPaperworkByIndex(9);
+            return ActivateInteractableWithFocus(paperwork);
+        }
+
+        return false;
+    }
+
+    private bool ActivateStaticInteractable(Type type)
+    {
+        if (type == null)
+            return false;
+
+        var instance = GetStaticInstance(type);
+        return ActivateInteractableWithFocus(instance);
+    }
+
+    private bool ActivateDrawer(string side)
+    {
+        if (_grimDeskDrawerType == null || string.IsNullOrWhiteSpace(side))
+            return false;
+
+        var enumType = TypeResolver.Get("ELeftOrRight");
+        if (enumType == null)
+            return false;
+
+        try
+        {
+            var value = Enum.Parse(enumType, side, ignoreCase: true);
+            var drawer = GetDrawerByType(value) ?? GetGrimDeskDrawerByField(value);
+            if (drawer == null)
+                return false;
+
+            if (!TrySetDrawerShortcutScreenPos(drawer))
+            {
+                return false;
+            }
+            return ActivateInteractableWithFocus(drawer);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private bool TryFindSelectableLinear(NavigationDirection direction, out object selectable)
     {
         selectable = null;
+        if (_selectableType == null)
+            return false;
+
         var strictCandidates = GetEligibleSelectables(requireScreen: true);
         var list = strictCandidates.Count > 0 ? strictCandidates : GetEligibleSelectables(requireScreen: false);
         if (list.Count == 0)
@@ -885,116 +1250,6 @@ public sealed class UiNavigationHandler
         index = forward ? (index + 1) % ordered.Count : (index - 1 + ordered.Count) % ordered.Count;
         selectable = ordered[index];
         return selectable != null;
-    }
-
-    private bool AnnounceMoney()
-    {
-        if (_hudManagerType == null)
-            return false;
-
-        var instance = GetStaticInstance(_hudManagerType);
-        if (instance == null)
-            return false;
-
-        var textMoney = GetMemberValue(instance, "TextMoney");
-        if (textMoney == null)
-            return false;
-
-        var text = GetComponentText(textMoney, _tmpTextType) ?? GetComponentText(textMoney, _textType);
-        if (string.IsNullOrWhiteSpace(text))
-            return false;
-
-        _screenreader?.Announce(text.Trim());
-        return true;
-    }
-
-
-    private bool TryHandlePaperworkShortcut()
-    {
-        var index = GetNumberRowIndexDown();
-        if (index < 0)
-            return false;
-
-        var ctrlOrCommand = IsCtrlOrCommandHeld();
-        var altOrOption = IsAltOrOptionHeld();
-        if (ctrlOrCommand || altOrOption)
-        {
-            if (!IsMarkerHeld())
-                return true;
-
-            var markLive = ctrlOrCommand && !altOrOption;
-            var markDie = altOrOption && !ctrlOrCommand;
-            if (!markLive && !markDie)
-                return true;
-
-            var paperwork = GetPaperworkByIndex(index);
-            if (paperwork == null)
-                return true;
-
-            var mark = GetMemberValue(paperwork, markLive ? "MarkLive" : "MarkDie");
-            return ActivateInteractableWithFocus(mark);
-        }
-
-        var selected = GetPaperworkByIndex(index);
-        return ActivateInteractableWithFocus(selected);
-    }
-
-    private int GetNumberRowIndexDown()
-    {
-        for (var i = 1; i <= 9; i++)
-        {
-            if (GetKeyDown("Alpha" + i))
-                return i - 1;
-        }
-
-        if (GetKeyDown("Alpha0"))
-            return 9;
-
-        return -1;
-    }
-
-    private bool IsCtrlOrCommandHeld()
-    {
-        return GetKey("LeftControl")
-               || GetKey("RightControl")
-               || GetKey("LeftCommand")
-               || GetKey("RightCommand");
-    }
-
-    private bool IsAltOrOptionHeld()
-    {
-        return GetKey("LeftAlt")
-               || GetKey("RightAlt");
-    }
-
-    private bool ActivateStaticInteractable(Type type)
-    {
-        if (type == null)
-            return false;
-
-        var instance = GetStaticInstance(type);
-        return ActivateInteractableWithFocus(instance);
-    }
-
-    private bool ActivateDrawer(string side)
-    {
-        if (_grimDeskDrawerType == null || string.IsNullOrWhiteSpace(side))
-            return false;
-
-        var enumType = TypeResolver.Get("ELeftOrRight");
-        if (enumType == null)
-            return false;
-
-        try
-        {
-            var value = Enum.Parse(enumType, side, ignoreCase: true);
-            var drawer = GetDrawerByType(value);
-            return ActivateInteractableWithFocus(drawer);
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     private bool ActivatePiggyBank()
@@ -1068,6 +1323,19 @@ public sealed class UiNavigationHandler
             return false;
 
         var paperwork = GetFocusedPaperwork();
+        if (paperwork == null)
+            return false;
+
+        var mark = GetMemberValue(paperwork, live ? "MarkLive" : "MarkDie");
+        return TriggerInteractable(mark);
+    }
+
+    private bool TryMarkPaperworkByIndex(int index, bool live)
+    {
+        if (!IsMarkerHeld())
+            return false;
+
+        var paperwork = GetPaperworkByIndex(index);
         if (paperwork == null)
             return false;
 
@@ -1150,17 +1418,173 @@ public sealed class UiNavigationHandler
         if (interactable == null)
             return false;
 
+        interactable = ResolveInteractableForFocus(interactable);
+        if (interactable == null)
+            return false;
+
+        if (!CanActivateInteractableWithShortcut(interactable))
+            return false;
+
+        if (!TryMoveCursorToInteractable(interactable))
+            return false;
+
         var now = Environment.TickCount;
         _keyboardNavUntilTick = now + 500;
         _keyboardFocusUntilTick = now + 1500;
         _keyboardFocusActive = true;
-        _ignoreMouseUntilMove = true;
 
         SetInteractableFocus(interactable);
         if (TryErasePaperworkMark(interactable))
             return true;
         if (!TryInvokeInteract(interactable))
             TryInvokeUiClick(interactable);
+        return true;
+    }
+
+    private bool TryMoveCursorToInteractable(object interactable)
+    {
+        interactable = ResolveInteractableForFocus(interactable);
+        if (interactable == null)
+            return false;
+
+        var screen = _pendingShortcutScreenPos ?? GetInteractableScreenPosition(interactable);
+        _pendingShortcutScreenPos = null;
+        if (screen == null)
+            return false;
+
+        _virtualCursorPos = screen.Value;
+        _virtualCursorActive = true;
+        EnsureVirtualCursorOverlay();
+        SetSystemCursorVisible(false);
+        UpdateVirtualCursorOverlayPosition(screen.Value.x, screen.Value.y);
+        RefreshCursorSpriteIfNeeded();
+        return true;
+    }
+
+    private bool TrySetPaperworkShortcutScreenPos(int index)
+    {
+        var pos = GetPaperworkShortcutScreenPos(index);
+        if (pos == null)
+            return false;
+
+        _pendingShortcutScreenPos = pos;
+        return true;
+    }
+
+    private (float x, float y)? GetPaperworkShortcutScreenPos(int index)
+    {
+        if (_grimDeskType == null || index < 0)
+            return null;
+
+        var desk = GetStaticInstance(_grimDeskType);
+        if (desk == null)
+            return null;
+
+        var marker = GetMemberValue(desk, "PaperWorkSpawnMarker");
+        if (marker == null)
+            return null;
+
+        var markerPos = GetTransformPosition3(marker);
+        if (markerPos == null)
+            return null;
+
+        var offsetX = 1.0f * (index % 4);
+        var offsetY = 0.3f * (index % 4) - 0.6f * (float)Math.Floor(index / 4.0);
+        var offsetZ = (-index * 2f) - 3f;
+        var world = (x: markerPos.Value.x + offsetX, y: markerPos.Value.y + offsetY, z: markerPos.Value.z + offsetZ);
+
+        var screen = WorldToScreenPoint(world) ?? WorldToScreenPointWithCamera(world);
+        if (screen != null)
+            return screen;
+
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+        return ToScreenPosition((world.x, world.y), width, height);
+    }
+
+    private bool TrySetDrawerShortcutScreenPos(object drawer)
+    {
+        if (drawer == null)
+            return false;
+
+        var center = GetMemberValue(drawer, "Collider");
+        var bounds = GetColliderBoundsCenter(center);
+        if (bounds != null)
+        {
+            var screen = WorldToScreenPoint(bounds.Value) ?? WorldToScreenPointWithCamera((bounds.Value.x, bounds.Value.y, 0f));
+            if (screen != null)
+            {
+                _pendingShortcutScreenPos = screen;
+                return true;
+            }
+        }
+
+        var pos = GetTransformPosition3(GetInteractableGameObject(drawer) ?? drawer);
+        if (pos != null)
+        {
+            var screen = WorldToScreenPoint(pos.Value) ?? WorldToScreenPointWithCamera(pos.Value);
+            if (screen != null)
+            {
+                _pendingShortcutScreenPos = screen;
+                return true;
+            }
+        }
+
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+        if (width > 0 && height > 0)
+        {
+            var isLeft = string.Equals(drawer.GetType().GetProperty("Type")?.GetValue(drawer)?.ToString(), "Left", StringComparison.OrdinalIgnoreCase);
+            var fallbackX = isLeft ? width * 0.25f : width * 0.75f;
+            var fallbackY = height * 0.5f;
+            _pendingShortcutScreenPos = (fallbackX, fallbackY);
+            return true;
+        }
+
+        return false;
+    }
+
+    private object GetGrimDeskDrawerByField(object drawerTypeValue)
+    {
+        if (_grimDeskType == null || drawerTypeValue == null)
+            return null;
+
+        var desk = GetStaticInstance(_grimDeskType);
+        if (desk == null)
+            return null;
+
+        var name = drawerTypeValue.ToString();
+        if (string.Equals(name, "Left", StringComparison.OrdinalIgnoreCase))
+            return GetMemberValue(desk, "DrawerLeft");
+        if (string.Equals(name, "Right", StringComparison.OrdinalIgnoreCase))
+            return GetMemberValue(desk, "DrawerRight");
+
+        return null;
+    }
+
+    private bool CanActivateInteractableWithShortcut(object interactable)
+    {
+        if (interactable == null)
+            return false;
+
+        if (IsShopItem(interactable) && !IsShopItemOwned(interactable) && !IsShopSceneActive())
+            return false;
+
+        return true;
+    }
+
+    private bool ActivateOrInteractFallback(object interactable)
+    {
+        if (interactable == null)
+            return false;
+
+        if (ActivateInteractableWithFocus(interactable))
+            return true;
+
+        if (TryInvokeInteract(interactable))
+            return true;
+
+        TryInvokeUiClick(interactable);
         return true;
     }
 
@@ -1233,6 +1657,128 @@ public sealed class UiNavigationHandler
         {
             return false;
         }
+    }
+
+    private bool IsShopSceneActive()
+    {
+        if (_elevatorManagerType == null)
+            return false;
+
+        var instance = GetStaticInstance(_elevatorManagerType);
+        if (instance == null)
+            return false;
+
+        try
+        {
+            var method = _elevatorManagerType.GetMethod("GetCurrentScene", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            var scene = method.Invoke(instance, null);
+            return scene != null && string.Equals(scene.ToString(), "Shop", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private object GetElevatorButtonForScene(string sceneName)
+    {
+        if (_elevatorType == null || _eSceneType == null || string.IsNullOrWhiteSpace(sceneName))
+            return null;
+
+        try
+        {
+            var instanceField = _elevatorType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            object sceneValue;
+            try
+            {
+                sceneValue = Enum.Parse(_eSceneType, sceneName);
+            }
+            catch
+            {
+                return null;
+            }
+
+            var method = _elevatorType.GetMethod("GetElevatorButtonBySceneType", BindingFlags.Instance | BindingFlags.Public);
+            return method?.Invoke(instance, new[] { sceneValue });
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private object FindElevatorButtonInScene(string sceneName)
+    {
+        if (_elevatorButtonType == null || _eSceneType == null || string.IsNullOrWhiteSpace(sceneName))
+            return null;
+
+        object sceneValue;
+        try
+        {
+            sceneValue = Enum.Parse(_eSceneType, sceneName);
+        }
+        catch
+        {
+            return null;
+        }
+
+        foreach (var button in FindSceneObjectsOfType(_elevatorButtonType))
+        {
+            if (button == null)
+                continue;
+
+            if (!IsInAllowedScene(button))
+                continue;
+
+            var go = GetInteractableGameObject(button) ?? GetMemberValue(button, "gameObject");
+            if (go != null && !IsGameObjectActive(go))
+                continue;
+
+            var dest = GetMemberValue(button, "DestinationScene");
+            if (dest != null && dest.Equals(sceneValue))
+                return button;
+        }
+
+        return null;
+    }
+
+    private string GetInteractableEnabledState(object interactable)
+    {
+        if (interactable == null)
+            return "null";
+
+        try
+        {
+            var type = interactable.GetType();
+            var enabledField = type.GetField("bIsEnabled", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (enabledField != null && enabledField.GetValue(interactable) is bool enabled)
+                return enabled ? "true" : "false";
+
+            var enabledProp = type.GetProperty("enabled", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (enabledProp != null && enabledProp.GetValue(interactable) is bool enabledPropValue)
+                return enabledPropValue ? "true" : "false";
+
+            var go = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
+            if (go != null)
+            {
+                var goType = go.GetType();
+                if (ReflectionUtils.TryGetBoolProperty(goType, go, "activeInHierarchy", out var active))
+                    return active ? "active" : "inactive";
+            }
+        }
+        catch
+        {
+            return "error";
+        }
+
+        return "unknown";
     }
 
     private bool IsDialogActive()
@@ -1364,11 +1910,14 @@ public sealed class UiNavigationHandler
         _keyCodeType ??= TypeResolver.Get("UnityEngine.KeyCode");
         _textType ??= TypeResolver.Get("UnityEngine.UI.Text");
         _tmpTextType ??= TypeResolver.Get("TMPro.TextMeshProUGUI");
+        _tmpTextMeshType ??= TypeResolver.Get("TMPro.TextMeshPro");
         _interactableType ??= TypeResolver.Get("Interactable");
         _inputManagerType ??= TypeResolver.Get("InputManager");
         _hudManagerType ??= TypeResolver.Get("HUDManager");
         _cameraType ??= TypeResolver.Get("UnityEngine.Camera");
         _screenType ??= TypeResolver.Get("UnityEngine.Screen");
+        _sceneManagerType ??= TypeResolver.Get("UnityEngine.SceneManagement.SceneManager");
+        _sceneType ??= TypeResolver.Get("UnityEngine.SceneManagement.Scene");
         _vector3Type ??= TypeResolver.Get("UnityEngine.Vector3");
         _vector2Type ??= TypeResolver.Get("UnityEngine.Vector2");
         _physics2DType ??= TypeResolver.Get("UnityEngine.Physics2D");
@@ -1377,6 +1926,11 @@ public sealed class UiNavigationHandler
         _grimDeskType ??= TypeResolver.Get("GrimDesk");
         _grimDeskDrawerType ??= TypeResolver.Get("GrimDeskDrawer");
         _deskItemType ??= TypeResolver.Get("DeskItem");
+        _shopItemType ??= TypeResolver.Get("ShopItem");
+        _shopType ??= TypeResolver.Get("Shop");
+        _shopManagerType ??= TypeResolver.Get("ShopManager");
+        _elevatorType ??= TypeResolver.Get("Elevator");
+        _eSceneType ??= TypeResolver.Get("EScene");
         _faxMachineType ??= TypeResolver.Get("FaxMachine");
         _spinnerType ??= TypeResolver.Get("Spinner");
         _catToyType ??= TypeResolver.Get("CatToy");
@@ -1419,8 +1973,20 @@ public sealed class UiNavigationHandler
         _skipIntroType ??= TypeResolver.Get("SkipIntro");
         _galleryScreenType ??= TypeResolver.Get("GalleryScreen");
         _demoEndScreenType ??= TypeResolver.Get("DemoEndScreen");
+        _articyGlobalVariablesType ??= TypeResolver.Get("Articy.Project_Of_Death.GlobalVariables.ArticyGlobalVariables");
         _comicManagerType ??= TypeResolver.Get("ComicManager");
         _unityObjectType ??= TypeResolver.Get("UnityEngine.Object");
+        _gameObjectType ??= TypeResolver.Get("UnityEngine.GameObject");
+        _transformType ??= TypeResolver.Get("UnityEngine.Transform");
+        _canvasScalerType ??= TypeResolver.Get("UnityEngine.UI.CanvasScaler");
+        _graphicRaycasterType ??= TypeResolver.Get("UnityEngine.UI.GraphicRaycaster");
+        _imageType ??= TypeResolver.Get("UnityEngine.UI.Image");
+        _spriteType ??= TypeResolver.Get("UnityEngine.Sprite");
+        _texture2DType ??= TypeResolver.Get("UnityEngine.Texture2D");
+        _colorType ??= TypeResolver.Get("UnityEngine.Color");
+        _rectType ??= TypeResolver.Get("UnityEngine.Rect");
+        _renderModeType ??= TypeResolver.Get("UnityEngine.RenderMode");
+        _cursorType ??= TypeResolver.Get("UnityEngine.Cursor");
         _findObjectsOfTypeMethod ??= _unityObjectType?.GetMethod(
             "FindObjectsOfType",
             BindingFlags.Public | BindingFlags.Static,
@@ -1468,6 +2034,63 @@ public sealed class UiNavigationHandler
         }
     }
 
+    private void UpdateSceneFocusLock()
+    {
+        if (IsSceneChanging())
+        {
+            if (!_sceneChanging)
+            {
+                _sceneChanging = true;
+                ResetFocusForSceneChange();
+            }
+
+            return;
+        }
+
+        _sceneChanging = false;
+
+        var activeName = TryGetActiveUnitySceneName(out var unityScene) ? unityScene : null;
+        var elevatorName = TryGetElevatorSceneName(out var elevatorScene) ? elevatorScene : null;
+
+        var changed = !string.Equals(activeName, _activeSceneName, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(elevatorName, _elevatorSceneName, StringComparison.OrdinalIgnoreCase);
+
+        _activeSceneName = activeName;
+        _elevatorSceneName = elevatorName;
+
+        _allowedSceneNames.Clear();
+        if (!string.IsNullOrWhiteSpace(_activeSceneName))
+            _allowedSceneNames.Add(_activeSceneName);
+        if (!string.IsNullOrWhiteSpace(_elevatorSceneName))
+            _allowedSceneNames.Add(_elevatorSceneName);
+        _allowedSceneNames.Add("DontDestroyOnLoad");
+
+        if (changed)
+            ResetFocusForSceneChange();
+    }
+
+    private void ResetFocusForSceneChange()
+    {
+        ClearInteractableFocus();
+        ClearUiSelection();
+        _lastEventSelected = null;
+        _keyboardFocusActive = false;
+        _keyboardFocusUntilTick = 0;
+        _keyboardNavUntilTick = 0;
+        _pendingEventSystemSyncUntil = 0;
+        _virtualCursorActive = false;
+        _virtualCursorTexture = null;
+        _virtualCursorSprite = null;
+        _virtualCursorTextureWidth = 0f;
+        _virtualCursorTextureHeight = 0f;
+        _lastRawMousePos = null;
+        _virtualCursorUsesFallback = false;
+        _cursorHiddenForVirtual = false;
+        _pendingShortcutScreenPos = null;
+        VirtualMouseState.Reset();
+        SetVirtualCursorOverlayVisible(false);
+    }
+
     private bool IsPointerOverUi()
     {
         if (_eventSystemType == null || _pointerEventDataType == null || _raycastResultType == null || _vector2Type == null)
@@ -1484,7 +2107,7 @@ public sealed class UiNavigationHandler
             if (pointer == null)
                 return false;
 
-            var screen = GetMousePosition() ?? (_virtualCursorInitialized ? (_virtualCursorX, _virtualCursorY) : ((float x, float y)?)null);
+            var screen = GetMousePosition();
             if (screen == null)
                 return false;
 
@@ -1510,7 +2133,8 @@ public sealed class UiNavigationHandler
                     continue;
 
                 var goProp = item.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
-                if (goProp?.GetValue(item) != null)
+                var go = goProp?.GetValue(item);
+                if (go != null && IsInAllowedScene(go))
                     return true;
             }
         }
@@ -1536,28 +2160,72 @@ public sealed class UiNavigationHandler
         }
     }
 
-    private void UpdateVirtualCursorFocus(NavigationDirection direction, bool submitPressed)
+    private void UpdateVirtualCursorFocus(NavigationDirection direction, bool submitPressed, float axisX, float axisY)
     {
-        UpdateVirtualCursorPosition(direction);
+        var moved = UpdatePointerFromInput(axisX, axisY, direction, out var sawArrowInput);
+        if (!moved)
+            SyncVirtualCursorToRawMouse();
 
         if (_lastFocusedInteractable != null && !IsInteractableActive(_lastFocusedInteractable))
         {
             ClearInteractableFocus();
         }
 
-        if (_pendingNavigationFocus != null)
+        if (sawArrowInput && !_virtualCursorActive)
+            ActivateVirtualCursorFromRaw();
+
+        if (_virtualCursorActive)
         {
-            var focus = _pendingNavigationFocus;
-            _pendingNavigationFocus = null;
-            SetInteractableFocus(focus);
+            SetSystemCursorVisible(false);
+            RefreshCursorSpriteIfNeeded();
+        }
+        else
+        {
+            SetSystemCursorVisible(true);
+        }
+
+        var mousePosition = GetMousePosition();
+        if (mousePosition == null)
+        {
             if (submitPressed)
+            {
                 SubmitInteractable();
+                return;
+            }
+
+            if (_keyboardFocusActive)
+                return;
+
+            if (_lastFocusedInteractable != null && !IsInteractableInstance(_lastFocusedInteractable))
+                return;
+
+            ClearInteractableFocus();
             return;
         }
 
-        var hit = GetInteractableAtScreenPosition(_virtualCursorX, _virtualCursorY);
+        var uiHit = GetUiRaycastGameObject();
+        var hit = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
+        if (hit == null && IsShopActive())
+        {
+            var shopHit = GetShopItemAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
+            if (shopHit != null)
+                hit = shopHit;
+        }
         if (hit == null)
         {
+            if (uiHit != null)
+            {
+                var selectable = _selectableType != null ? GetComponentByType(uiHit, _selectableType) : null;
+                var target = selectable ?? uiHit;
+                if (!ReferenceEquals(target, _lastFocusedInteractable))
+                    SetInteractableFocus(target);
+
+                if (submitPressed)
+                    SubmitInteractable();
+
+                return;
+            }
+
             if (submitPressed)
             {
                 SubmitInteractable();
@@ -1581,371 +2249,577 @@ public sealed class UiNavigationHandler
             SubmitInteractable();
     }
 
-    private void UpdateVirtualCursorPosition(NavigationDirection direction)
+    private bool UpdatePointerFromInput(float axisX, float axisY, NavigationDirection direction, out bool sawArrowInput)
     {
-        var allowMouse = Environment.TickCount > _keyboardNavUntilTick;
-        var mouse = allowMouse ? GetMousePosition() : null;
-        if (mouse.HasValue)
-        {
-            if (!_virtualCursorInitialized)
-            {
-                _virtualCursorX = mouse.Value.x;
-                _virtualCursorY = mouse.Value.y;
-                _virtualCursorInitialized = true;
-                _keyboardFocusActive = false;
-                _ignoreMouseUntilMove = false;
-            }
-            else if (_ignoreMouseUntilMove)
-            {
-                if (Math.Abs(mouse.Value.x - _lastMouseX) > 1f || Math.Abs(mouse.Value.y - _lastMouseY) > 1f)
-                {
-                    _virtualCursorX = mouse.Value.x;
-                    _virtualCursorY = mouse.Value.y;
-                    _keyboardFocusActive = false;
-                    _ignoreMouseUntilMove = false;
-                }
-            }
-            else if (direction == NavigationDirection.None && (Math.Abs(mouse.Value.x - _lastMouseX) > 1f || Math.Abs(mouse.Value.y - _lastMouseY) > 1f))
-            {
-                _virtualCursorX = mouse.Value.x;
-                _virtualCursorY = mouse.Value.y;
-                _keyboardFocusActive = false;
-            }
+        var left = GetKey("LeftArrow");
+        var right = GetKey("RightArrow");
+        var up = GetKey("UpArrow");
+        var down = GetKey("DownArrow");
+        sawArrowInput = left || right || up || down
+            || axisX < -AxisDeadzone || axisX > AxisDeadzone
+            || axisY < -AxisDeadzone || axisY > AxisDeadzone;
 
-            _lastMouseX = mouse.Value.x;
-            _lastMouseY = mouse.Value.y;
+        var movement = GetPointerMovementVector(axisX, axisY);
+        if (movement.x == 0f && movement.y == 0f && direction != NavigationDirection.None)
+        {
+            movement = direction switch
+            {
+                NavigationDirection.Left => (-1f, 0f),
+                NavigationDirection.Right => (1f, 0f),
+                NavigationDirection.Up => (0f, 1f),
+                NavigationDirection.Down => (0f, -1f),
+                _ => movement
+            };
         }
 
-        if (!_virtualCursorInitialized)
+        if (movement.x == 0f && movement.y == 0f)
+            return false;
+
+        MoveVirtualCursor(movement.x, movement.y);
+        _keyboardFocusActive = true;
+        return true;
+    }
+
+    private void ActivateVirtualCursorFromRaw()
+    {
+        var raw = GetRawMousePosition();
+        if (raw == null)
         {
-            if (direction != NavigationDirection.None)
+            var width = Math.Max(GetScreenDimension("width"), 1);
+            var height = Math.Max(GetScreenDimension("height"), 1);
+            _virtualCursorPos = (width / 2f, height / 2f);
+        }
+        else
+        {
+            _virtualCursorPos = raw.Value;
+        }
+        _virtualCursorActive = true;
+        EnsureVirtualCursorOverlay();
+        UpdateVirtualCursorOverlayPosition(_virtualCursorPos.x, _virtualCursorPos.y);
+    }
+
+    private void SyncVirtualCursorToRawMouse()
+    {
+        if (_virtualCursorActive)
+        {
+            var mouseDx = GetAxisRawAny("Mouse X", "MouseX");
+            var mouseDy = GetAxisRawAny("Mouse Y", "MouseY");
+            if (Math.Abs(mouseDx) > 0.01f || Math.Abs(mouseDy) > 0.01f)
             {
-                var origin = GetNavigationOrigin();
-                if (origin != null)
-                {
-                    _virtualCursorX = origin.Value.x;
-                    _virtualCursorY = origin.Value.y;
-                    _virtualCursorInitialized = true;
-                }
+                _virtualCursorActive = false;
+                SetVirtualCursorOverlayVisible(false);
             }
+
+            return;
         }
 
-        if (!_virtualCursorInitialized)
+        var raw = GetRawMousePosition();
+        if (raw == null)
             return;
 
-        if (direction != NavigationDirection.None)
-        {
-            var focus = TryMoveCursorToNearest(direction);
-            if (focus != null)
-                _pendingNavigationFocus = focus;
-        }
-
-        var width = GetScreenDimension("width");
-        var height = GetScreenDimension("height");
-        if (width > 0)
-            _virtualCursorX = Clamp(_virtualCursorX, 0, width - 1);
-        if (height > 0)
-            _virtualCursorY = Clamp(_virtualCursorY, 0, height - 1);
+        _lastRawMousePos = raw;
     }
 
-    private object TryMoveCursorToNearest(NavigationDirection direction)
+    private void MoveVirtualCursor(float dx, float dy)
     {
-        if (direction == NavigationDirection.None)
-            return null;
+        if (dx == 0f && dy == 0f)
+            return;
 
-        var origin = GetNavigationOrigin();
-        if (origin == null)
-            return null;
-
-        var currentResolved = _lastFocusedInteractable != null ? ResolveInteractableForFocus(_lastFocusedInteractable) : null;
-        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-        var width = GetScreenDimension("width");
-        var height = GetScreenDimension("height");
-        if (width <= 0 || height <= 0)
-            return null;
-
-        EnsureRaycastScreenCache(width, height);
-
-        var start = GetPrimaryCursorOrigin(origin.Value, width, height, useMouse: false);
-        if (!TryFindNearestInteractableInDirection(start, direction, width, height, currentResolved, seen, out var hit, out var hitScreen, out var anyCollider, out var candidateCount))
+        if (!_virtualCursorActive)
         {
-            return null;
-        }
-
-        var resolvedHit = ResolveInteractableForFocus(hit) ?? hit;
-        if (resolvedHit == null)
-            return null;
-
-        _virtualCursorX = hitScreen.x;
-        _virtualCursorY = hitScreen.y;
-        _virtualCursorInitialized = true;
-        return resolvedHit;
-    }
-
-    private (float x, float y)? GetNavigationOrigin()
-    {
-        if (_lastFocusedInteractable != null)
-        {
-            var resolved = ResolveInteractableForFocus(_lastFocusedInteractable);
-            var position = GetInteractableScreenPosition(resolved ?? _lastFocusedInteractable);
-            if (position != null)
-                return position;
-        }
-
-        var mouseHit = GetMouseHitInteractable();
-        if (mouseHit != null)
-        {
-            var resolvedMouse = ResolveInteractableForFocus(mouseHit);
-            var mousePosition = GetInteractableScreenPosition(resolvedMouse ?? mouseHit);
-            if (mousePosition != null)
-                return mousePosition;
-        }
-
-        if (_keyboardFocusActive)
-        {
-            if (_virtualCursorInitialized)
-                return (_virtualCursorX, _virtualCursorY);
-
-            var screenWidth = GetScreenDimension("width");
-            var screenHeight = GetScreenDimension("height");
-            if (screenWidth > 0 && screenHeight > 0)
-                return (screenWidth / 2f, screenHeight / 2f);
-        }
-
-        var lastHit = GetInputManagerLastHit();
-        if (lastHit != null)
-        {
-            var resolved = ResolveInteractableForFocus(lastHit);
-            var position = GetInteractableScreenPosition(resolved ?? lastHit);
-            if (position != null)
-                return position;
-        }
-
-        if (_virtualCursorInitialized)
-            return (_virtualCursorX, _virtualCursorY);
-
-        var width = GetScreenDimension("width");
-        var height = GetScreenDimension("height");
-        if (width > 0 && height > 0)
-            return (width / 2f, height / 2f);
-
-        return null;
-    }
-
-    private static bool IsInDirection(NavigationDirection direction, float dx, float dy)
-    {
-        return direction switch
-        {
-            NavigationDirection.Up => dy > 0f,
-            NavigationDirection.Down => dy < 0f,
-            NavigationDirection.Left => dx < 0f,
-            NavigationDirection.Right => dx > 0f,
-            _ => false
-        };
-    }
-
-    private static bool IsWithinScreen((float x, float y) screen, int width, int height)
-    {
-        if (width <= 0 || height <= 0)
-            return true;
-
-        return screen.x >= 0f && screen.y >= 0f && screen.x <= width && screen.y <= height;
-    }
-
-    private bool TryFindNearestInteractableInDirection(
-        (float x, float y) origin,
-        NavigationDirection direction,
-        int width,
-        int height,
-        object currentResolved,
-        HashSet<object> seen,
-        out object hitInteractable,
-        out (float x, float y) hitScreen,
-        out bool hitAnyCollider,
-        out int candidateCount)
-    {
-        hitInteractable = null;
-        hitScreen = default;
-        hitAnyCollider = false;
-        candidateCount = 0;
-
-        var candidates = GetCandidatePositions(width, height, ref hitAnyCollider);
-        var sampleCandidates = GetRaycastSampleCandidates(width, height);
-        if (sampleCandidates.Count > 0)
-        {
-            var seenTargets = new HashSet<object>(ReferenceEqualityComparer.Instance);
-            foreach (var candidate in candidates)
-                seenTargets.Add(candidate.target);
-
-            foreach (var candidate in sampleCandidates)
+            var raw = GetRawMousePosition();
+            if (raw == null)
             {
-                if (candidate.target == null)
-                    continue;
-
-                if (seenTargets.Add(candidate.target))
-                    candidates.Add(candidate);
-            }
-        }
-        candidateCount = candidates.Count;
-        if (candidates.Count == 0)
-        {
-            if (TryFindSelectableNavigationTarget(direction, out var selectableTarget))
-            {
-                hitInteractable = selectableTarget;
-                hitScreen = origin;
-                return true;
-            }
-
-            if (TryFindSelectableLinear(direction, out selectableTarget))
-            {
-                hitInteractable = selectableTarget;
-                hitScreen = origin;
-                return true;
-            }
-
-            return false;
-        }
-
-        var bestDistance = float.MaxValue;
-        foreach (var candidate in candidates)
-        {
-            var resolved = ResolveInteractableForFocus(candidate.target) ?? candidate.target;
-            if (resolved == null)
-                continue;
-
-            if (currentResolved != null && ReferenceEquals(resolved, currentResolved))
-                continue;
-
-            if (!seen.Add(resolved))
-                continue;
-
-            var dx = candidate.screen.x - origin.x;
-            var dy = candidate.screen.y - origin.y;
-            if (!IsInDirection(direction, dx, dy))
-                continue;
-
-            float dist;
-            if (direction == NavigationDirection.Left || direction == NavigationDirection.Right)
-            {
-                var primary = Math.Abs(dx);
-                var secondary = Math.Abs(dy);
-                dist = (primary * primary) + (secondary * secondary * 4f);
+                var width = Math.Max(GetScreenDimension("width"), 1);
+                var height = Math.Max(GetScreenDimension("height"), 1);
+                _virtualCursorPos = (width / 2f, height / 2f);
             }
             else
             {
-                var primary = Math.Abs(dy);
-                var secondary = Math.Abs(dx);
-                dist = (primary * primary) + (secondary * secondary * 4f);
+                _virtualCursorPos = raw.Value;
             }
-            if (dist < bestDistance)
-            {
-                bestDistance = dist;
-                hitInteractable = resolved;
-                hitScreen = candidate.screen;
-            }
+            _virtualCursorActive = true;
+            EnsureVirtualCursorOverlay();
+            UpdateVirtualCursorOverlayPosition(_virtualCursorPos.x, _virtualCursorPos.y);
         }
 
-        if (hitInteractable != null)
-            return true;
+        var screenWidth = Math.Max(GetScreenDimension("width"), 1);
+        var screenHeight = Math.Max(GetScreenDimension("height"), 1);
 
-        return TryFindDirectionalScan(origin, direction, width, height, currentResolved, seen, out hitInteractable, out hitScreen);
+        var targetX = _virtualCursorPos.x + (dx * PointerStep);
+        var targetY = _virtualCursorPos.y + (dy * PointerStep);
+        targetX = Math.Max(0, Math.Min(targetX, screenWidth - 1));
+        targetY = Math.Max(0, Math.Min(targetY, screenHeight - 1));
+
+        _virtualCursorPos = (targetX, targetY);
+        UpdateVirtualCursorOverlayPosition(targetX, targetY);
+        RefreshCursorSpriteIfNeeded();
     }
 
-    private bool TryFindDirectionalScan(
-        (float x, float y) origin,
-        NavigationDirection direction,
-        int width,
-        int height,
-        object currentResolved,
-        HashSet<object> seen,
-        out object hitInteractable,
-        out (float x, float y) hitScreen)
+    private void EnsureVirtualCursorOverlay()
     {
-        hitInteractable = null;
-        hitScreen = default;
-
-        var maxDistance = direction switch
+        if (_virtualCursorCanvas != null)
         {
-            NavigationDirection.Left => origin.x,
-            NavigationDirection.Right => width - origin.x,
-            NavigationDirection.Down => origin.y,
-            NavigationDirection.Up => height - origin.y,
-            _ => 0f
-        };
-
-        if (maxDistance <= 0f)
-            return false;
-
-        const int step = 24;
-        var dir = direction switch
-        {
-            NavigationDirection.Left => (-1f, 0f),
-            NavigationDirection.Right => (1f, 0f),
-            NavigationDirection.Up => (0f, 1f),
-            NavigationDirection.Down => (0f, -1f),
-            _ => (0f, 0f)
-        };
-
-        for (var dist = step; dist <= maxDistance; dist += step)
-        {
-            var baseX = origin.x + (dir.Item1 * dist);
-            var baseY = origin.y + (dir.Item2 * dist);
-
-            if (direction == NavigationDirection.Left || direction == NavigationDirection.Right)
-            {
-                if (baseX < 0f || baseX > width)
-                    continue;
-
-                for (var y = 0f; y <= height; y += step)
-                {
-                    var hit = GetInteractableAtScreenPosition(baseX, y);
-                    if (hit == null)
-                        continue;
-
-                    var resolved = ResolveInteractableForFocus(hit) ?? hit;
-                    if (resolved == null)
-                        continue;
-
-                    if (currentResolved != null && ReferenceEquals(resolved, currentResolved))
-                        continue;
-
-                    if (!seen.Add(resolved))
-                        continue;
-
-                    hitInteractable = resolved;
-                    hitScreen = (baseX, y);
-                    return true;
-                }
-            }
-            else
-            {
-                if (baseY < 0f || baseY > height)
-                    continue;
-
-                for (var x = 0f; x <= width; x += step)
-                {
-                    var hit = GetInteractableAtScreenPosition(x, baseY);
-                    if (hit == null)
-                        continue;
-
-                    var resolved = ResolveInteractableForFocus(hit) ?? hit;
-                    if (resolved == null)
-                        continue;
-
-                    if (currentResolved != null && ReferenceEquals(resolved, currentResolved))
-                        continue;
-
-                    if (!seen.Add(resolved))
-                        continue;
-
-                    hitInteractable = resolved;
-                    hitScreen = (x, baseY);
-                    return true;
-                }
-            }
+            SetVirtualCursorOverlayVisible(true);
+            return;
         }
 
-        return false;
+        if (_gameObjectType == null || _canvasType == null || _rectTransformType == null || _imageType == null || _vector2Type == null)
+            return;
+
+        try
+        {
+            var canvasGo = Activator.CreateInstance(_gameObjectType, "DAA_VirtualCursorCanvas");
+            if (canvasGo == null)
+                return;
+
+            var addComponent = _gameObjectType.GetMethod("AddComponent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            if (addComponent == null)
+                return;
+
+            var canvas = addComponent.Invoke(canvasGo, new object[] { _canvasType });
+            if (canvas != null)
+            {
+                var renderModeProp = _canvasType.GetProperty("renderMode", BindingFlags.Instance | BindingFlags.Public);
+                if (renderModeProp != null && _renderModeType != null)
+                {
+                    var overlay = Enum.Parse(_renderModeType, "ScreenSpaceOverlay");
+                    renderModeProp.SetValue(canvas, overlay);
+                }
+
+                var sortingOrderProp = _canvasType.GetProperty("sortingOrder", BindingFlags.Instance | BindingFlags.Public);
+                sortingOrderProp?.SetValue(canvas, 5000);
+            }
+
+            if (_canvasScalerType != null)
+                addComponent.Invoke(canvasGo, new object[] { _canvasScalerType });
+            if (_graphicRaycasterType != null)
+                addComponent.Invoke(canvasGo, new object[] { _graphicRaycasterType });
+
+            var cursorGo = Activator.CreateInstance(_gameObjectType, "DAA_VirtualCursor");
+            if (cursorGo == null)
+                return;
+
+            var cursorTransform = GetMemberValue(cursorGo, "transform");
+            var canvasTransform = GetMemberValue(canvasGo, "transform");
+            if (cursorTransform != null && canvasTransform != null && _transformType != null)
+            {
+                var setParent = _transformType.GetMethod("SetParent", BindingFlags.Instance | BindingFlags.Public, null, new[] { _transformType, typeof(bool) }, null);
+                setParent?.Invoke(cursorTransform, new[] { canvasTransform, false });
+            }
+
+            _virtualCursorImage = addComponent.Invoke(cursorGo, new object[] { _imageType });
+            _virtualCursorRectTransform = GetComponentByType(cursorGo, _rectTransformType);
+
+            if (_virtualCursorImage != null)
+            {
+                var raycastProp = _imageType.GetProperty("raycastTarget", BindingFlags.Instance | BindingFlags.Public);
+                raycastProp?.SetValue(_virtualCursorImage, false);
+
+                var sprite = GetGameCursorSprite();
+                if (sprite != null)
+                {
+                    var spriteProp = _imageType.GetProperty("sprite", BindingFlags.Instance | BindingFlags.Public);
+                    spriteProp?.SetValue(_virtualCursorImage, sprite);
+                }
+
+                if (_colorType != null)
+                {
+                    var colorProp = _imageType.GetProperty("color", BindingFlags.Instance | BindingFlags.Public);
+                    if (colorProp != null)
+                    {
+                        var color = CreateColor(1f, 1f, 1f, 1f);
+                        if (color != null)
+                            colorProp.SetValue(_virtualCursorImage, color);
+                    }
+                }
+            }
+
+            if (_virtualCursorRectTransform != null)
+            {
+                SetRectTransformVector2(_virtualCursorRectTransform, "anchorMin", 0f, 0f);
+                SetRectTransformVector2(_virtualCursorRectTransform, "anchorMax", 0f, 0f);
+                var hotspot = GetGameCursorHotspot();
+                var size = GetVirtualCursorSize();
+                var pivot = GetHotspotPivot(size.width, size.height, hotspot);
+                var pivotX = pivot.x;
+                var pivotY = pivot.y;
+                SetRectTransformVector2(_virtualCursorRectTransform, "pivot", pivotX, pivotY);
+                SetRectTransformVector2(_virtualCursorRectTransform, "sizeDelta", size.width, size.height);
+            }
+
+            _virtualCursorCanvas = canvasGo;
+            SetVirtualCursorOverlayVisible(true);
+            RefreshCursorSpriteIfNeeded();
+
+            var dontDestroy = _unityObjectType?.GetMethod("DontDestroyOnLoad", BindingFlags.Public | BindingFlags.Static, null, new[] { _unityObjectType }, null);
+            dontDestroy?.Invoke(null, new[] { canvasGo });
+        }
+        catch
+        {
+            _virtualCursorCanvas = null;
+            _virtualCursorImage = null;
+            _virtualCursorRectTransform = null;
+        }
+    }
+
+    private void SetVirtualCursorOverlayVisible(bool visible)
+    {
+        if (_virtualCursorCanvas == null || _gameObjectType == null)
+            return;
+
+        try
+        {
+            var setActive = _gameObjectType.GetMethod("SetActive", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(bool) }, null);
+            setActive?.Invoke(_virtualCursorCanvas, new object[] { visible });
+            SetSystemCursorVisible(!visible);
+        }
+        catch
+        {
+            // Ignore.
+        }
+    }
+
+    private void SetSystemCursorVisible(bool visible)
+    {
+        if (_cursorType == null)
+            return;
+
+        if (visible && !_cursorHiddenForVirtual)
+            return;
+
+        if (!visible && _cursorHiddenForVirtual)
+            return;
+
+        try
+        {
+            var prop = _cursorType.GetProperty("visible", BindingFlags.Public | BindingFlags.Static);
+            prop?.SetValue(null, visible);
+            _cursorHiddenForVirtual = !visible;
+        }
+        catch
+        {
+            // Ignore.
+        }
+    }
+
+    private void UpdateVirtualCursorOverlayPosition(float x, float y)
+    {
+        if (_virtualCursorRectTransform == null)
+            return;
+
+        SetRectTransformVector2(_virtualCursorRectTransform, "anchoredPosition", x, y);
+    }
+
+    private object GetGameCursorSprite()
+    {
+        if (_virtualCursorSprite != null)
+            return _virtualCursorSprite;
+
+        if (_texture2DType == null || _spriteType == null || _rectType == null || _vector2Type == null)
+            return null;
+
+        try
+        {
+            var texture = GetGameCursorTexture();
+            if (texture == null)
+            {
+                _virtualCursorUsesFallback = true;
+                _virtualCursorSprite = CreateFallbackCursorSprite();
+                return _virtualCursorSprite;
+            }
+
+            var width = GetTextureDimension(texture, "width");
+            var height = GetTextureDimension(texture, "height");
+            if (width <= 0 || height <= 0)
+                return null;
+
+            _virtualCursorTextureWidth = width;
+            _virtualCursorTextureHeight = height;
+
+            var rectCtor = _rectType.GetConstructor(new[] { typeof(float), typeof(float), typeof(float), typeof(float) });
+            var rect = rectCtor?.Invoke(new object[] { 0f, 0f, width, height });
+            if (rect == null)
+                return null;
+
+            var pivot = CreateVector2(0f, 0f);
+            if (pivot == null)
+                return null;
+
+            var create = _spriteType.GetMethod("Create", BindingFlags.Public | BindingFlags.Static, null, new[] { _texture2DType, _rectType, _vector2Type, typeof(float) }, null)
+                        ?? _spriteType.GetMethod("Create", BindingFlags.Public | BindingFlags.Static, null, new[] { _texture2DType, _rectType, _vector2Type }, null);
+            if (create == null)
+                return null;
+
+            var args = create.GetParameters().Length == 4
+                ? new object[] { texture, rect, pivot, 100f }
+                : new object[] { texture, rect, pivot };
+
+            _virtualCursorUsesFallback = false;
+            _virtualCursorSprite = create.Invoke(null, args);
+            return _virtualCursorSprite;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void RefreshCursorSpriteIfNeeded()
+    {
+        if (_virtualCursorImage == null || _imageType == null)
+            return;
+
+        if (!_virtualCursorUsesFallback)
+            return;
+
+        var texture = GetGameCursorTexture();
+        if (texture == null)
+            return;
+
+        _virtualCursorSprite = null;
+        _virtualCursorTextureWidth = 0f;
+        _virtualCursorTextureHeight = 0f;
+        _virtualCursorUsesFallback = false;
+
+        var sprite = GetGameCursorSprite();
+        if (sprite == null)
+            return;
+
+        try
+        {
+            var spriteProp = _imageType.GetProperty("sprite", BindingFlags.Instance | BindingFlags.Public);
+            spriteProp?.SetValue(_virtualCursorImage, sprite);
+
+            var hotspot = GetGameCursorHotspot();
+            var size = GetVirtualCursorSize();
+            var pivot = GetHotspotPivot(size.width, size.height, hotspot);
+            SetRectTransformVector2(_virtualCursorRectTransform, "pivot", pivot.x, pivot.y);
+            SetRectTransformVector2(_virtualCursorRectTransform, "sizeDelta", size.width, size.height);
+        }
+        catch
+        {
+            // Ignore refresh failures.
+        }
+    }
+
+    private object CreateFallbackCursorSprite()
+    {
+        if (_texture2DType == null || _spriteType == null || _rectType == null || _vector2Type == null || _colorType == null)
+            return null;
+
+        try
+        {
+            var ctor = _texture2DType.GetConstructor(new[] { typeof(int), typeof(int) });
+            if (ctor == null)
+                return null;
+
+            var texture = ctor.Invoke(new object[] { 16, 16 });
+            if (texture == null)
+                return null;
+
+            var color = CreateColor(1f, 1f, 1f, 1f);
+            if (color == null)
+                return null;
+
+            var colors = Array.CreateInstance(_colorType, 16 * 16);
+            for (var i = 0; i < colors.Length; i++)
+                colors.SetValue(color, i);
+
+            var setPixels = _texture2DType.GetMethod("SetPixels", BindingFlags.Instance | BindingFlags.Public, null, new[] { colors.GetType() }, null);
+            setPixels?.Invoke(texture, new object[] { colors });
+
+            var apply = _texture2DType.GetMethod("Apply", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+            apply?.Invoke(texture, null);
+
+            var rectCtor = _rectType.GetConstructor(new[] { typeof(float), typeof(float), typeof(float), typeof(float) });
+            var rect = rectCtor?.Invoke(new object[] { 0f, 0f, 16f, 16f });
+            if (rect == null)
+                return null;
+
+            var pivot = CreateVector2(0f, 0f);
+            if (pivot == null)
+                return null;
+
+            var create = _spriteType.GetMethod("Create", BindingFlags.Public | BindingFlags.Static, null, new[] { _texture2DType, _rectType, _vector2Type, typeof(float) }, null)
+                        ?? _spriteType.GetMethod("Create", BindingFlags.Public | BindingFlags.Static, null, new[] { _texture2DType, _rectType, _vector2Type }, null);
+            if (create == null)
+                return null;
+
+            var args = create.GetParameters().Length == 4
+                ? new object[] { texture, rect, pivot, 100f }
+                : new object[] { texture, rect, pivot };
+
+            _virtualCursorTextureWidth = 16f;
+            _virtualCursorTextureHeight = 16f;
+            return create.Invoke(null, args);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private object GetGameCursorTexture()
+    {
+        if (_virtualCursorTexture != null)
+            return _virtualCursorTexture;
+
+        if (_inputManagerType == null)
+            return null;
+
+        var instance = GetStaticInstance(_inputManagerType);
+        if (instance == null)
+            return null;
+
+        var texture = GetMemberValue(instance, "TextureCursor");
+        if (texture == null)
+            return null;
+
+        _virtualCursorTexture = texture;
+        return texture;
+    }
+
+    private (float width, float height) GetVirtualCursorSize()
+    {
+        if (_virtualCursorTextureWidth > 0f && _virtualCursorTextureHeight > 0f)
+            return (_virtualCursorTextureWidth, _virtualCursorTextureHeight);
+
+        var texture = GetGameCursorTexture();
+        if (texture == null)
+            return (16f, 16f);
+
+        var width = GetTextureDimension(texture, "width");
+        var height = GetTextureDimension(texture, "height");
+        if (width > 0f)
+            _virtualCursorTextureWidth = width;
+        if (height > 0f)
+            _virtualCursorTextureHeight = height;
+
+        if (_virtualCursorTextureWidth <= 0f || _virtualCursorTextureHeight <= 0f)
+            return (16f, 16f);
+
+        return (_virtualCursorTextureWidth, _virtualCursorTextureHeight);
+    }
+
+    private (float x, float y) GetGameCursorHotspot()
+    {
+        if (_inputManagerType == null)
+            return (0f, 0f);
+
+        var instance = GetStaticInstance(_inputManagerType);
+        if (instance == null)
+            return (0f, 0f);
+
+        var hotspot = GetMemberValue(instance, "CursorHotSpot");
+        var pos = GetVector2FromValue(hotspot);
+        return pos ?? (0f, 0f);
+    }
+
+    private (float x, float y) GetHotspotPivot(float width, float height, (float x, float y) hotspot)
+    {
+        if (width <= 0f || height <= 0f)
+            return (0f, 1f);
+
+        var pivotX = hotspot.x / width;
+        var pivotY = 1f - (hotspot.y / height);
+
+        if (pivotX < 0f) pivotX = 0f;
+        if (pivotX > 1f) pivotX = 1f;
+        if (pivotY < 0f) pivotY = 0f;
+        if (pivotY > 1f) pivotY = 1f;
+
+        return (pivotX, pivotY);
+    }
+
+    private float GetTextureDimension(object texture, string name)
+    {
+        if (texture == null)
+            return 0f;
+
+        try
+        {
+            var prop = texture.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public);
+            if (prop == null)
+                return 0f;
+
+            var value = prop.GetValue(texture);
+            if (value is int intValue)
+                return intValue;
+            if (value is float floatValue)
+                return floatValue;
+        }
+        catch
+        {
+            return 0f;
+        }
+
+        return 0f;
+    }
+
+    private object CreateVector2(float x, float y)
+    {
+        if (_vector2Type == null)
+            return null;
+
+        var ctor = _vector2Type.GetConstructor(new[] { typeof(float), typeof(float) });
+        return ctor?.Invoke(new object[] { x, y });
+    }
+
+    private object CreateColor(float r, float g, float b, float a)
+    {
+        if (_colorType == null)
+            return null;
+
+        var color = Activator.CreateInstance(_colorType);
+        var rField = _colorType.GetField("r", BindingFlags.Instance | BindingFlags.Public);
+        var gField = _colorType.GetField("g", BindingFlags.Instance | BindingFlags.Public);
+        var bField = _colorType.GetField("b", BindingFlags.Instance | BindingFlags.Public);
+        var aField = _colorType.GetField("a", BindingFlags.Instance | BindingFlags.Public);
+        rField?.SetValue(color, r);
+        gField?.SetValue(color, g);
+        bField?.SetValue(color, b);
+        aField?.SetValue(color, a);
+        return color;
+    }
+
+    private void SetRectTransformVector2(object rectTransform, string name, float x, float y)
+    {
+        if (rectTransform == null || _rectTransformType == null || _vector2Type == null)
+            return;
+
+        try
+        {
+            var prop = _rectTransformType.GetProperty(name, BindingFlags.Instance | BindingFlags.Public);
+            if (prop == null)
+                return;
+
+            var vector = CreateVector2(x, y);
+            if (vector != null)
+                prop.SetValue(rectTransform, vector);
+        }
+        catch
+        {
+            // Ignore.
+        }
+    }
+
+    private (float x, float y) GetPointerMovementVector(float axisX, float axisY)
+    {
+        var dx = 0f;
+        var dy = 0f;
+
+        if (GetKey("LeftArrow") || axisX < -AxisDeadzone)
+            dx = -1f;
+        else if (GetKey("RightArrow") || axisX > AxisDeadzone)
+            dx = 1f;
+
+        if (GetKey("UpArrow") || axisY > AxisDeadzone)
+            dy = 1f;
+        else if (GetKey("DownArrow") || axisY < -AxisDeadzone)
+            dy = -1f;
+
+        return (dx, dy);
     }
 
     private object GetUiRaycastGameObject()
@@ -1964,7 +2838,7 @@ public sealed class UiNavigationHandler
             if (pointer == null)
                 return null;
 
-            var screen = GetMousePosition() ?? (_virtualCursorInitialized ? (_virtualCursorX, _virtualCursorY) : ((float x, float y)?)null);
+            var screen = GetMousePosition();
             if (screen == null)
                 return null;
 
@@ -1991,7 +2865,7 @@ public sealed class UiNavigationHandler
 
                 var goProp = item.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
                 var go = goProp?.GetValue(item);
-                if (go != null)
+                if (go != null && IsInAllowedScene(go))
                     return go;
             }
         }
@@ -2001,113 +2875,6 @@ public sealed class UiNavigationHandler
         }
 
         return null;
-    }
-
-    private (float x, float y) GetPrimaryCursorOrigin((float x, float y) fallbackOrigin, int width, int height, bool useMouse)
-    {
-        if (useMouse && !_keyboardFocusActive)
-        {
-            var mouse = GetMousePosition();
-            if (mouse.HasValue)
-                return mouse.Value;
-        }
-
-        if (!_keyboardFocusActive)
-        {
-            var lastHit = GetInputManagerLastHit();
-            if (lastHit != null)
-            {
-                var position = GetInteractableScreenPosition(lastHit);
-                if (position != null)
-                    return position.Value;
-            }
-        }
-
-        if (_virtualCursorInitialized)
-            return (_virtualCursorX, _virtualCursorY);
-
-        if (width > 0 && height > 0)
-            return (width / 2f, height / 2f);
-
-        return fallbackOrigin;
-    }
-
-    private List<(object target, (float x, float y) screen)> GetCandidatePositions(int width, int height, ref bool hitAnyCollider)
-    {
-        if (IsDialogActive())
-        {
-            hitAnyCollider = false;
-            return GetDialogSelectableCandidates(width, height);
-        }
-
-        var now = Environment.TickCount;
-        if (_candidateCache != null
-            && _candidateCacheWidth == width
-            && _candidateCacheHeight == height
-            && unchecked(now - _candidateCacheTick) < 250)
-        {
-            hitAnyCollider = _candidateCacheHitAnyCollider;
-            return new List<(object target, (float x, float y) screen)>(_candidateCache);
-        }
-
-        var results = new List<(object target, (float x, float y) screen)>();
-        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-
-        foreach (var collider in FindSceneObjectsOfType(_collider2DType))
-            TryAddColliderCandidate(collider, width, height, ref hitAnyCollider, seen, results);
-
-        foreach (var collider in FindSceneObjectsOfType(_collider3DType))
-            TryAddColliderCandidate(collider, width, height, ref hitAnyCollider, seen, results);
-
-        if (IsOfficeActive())
-        {
-            foreach (var deskItem in GetDeskItemsFromGrimDesk())
-                TryAddInteractableCandidate(deskItem, width, height, seen, results);
-
-            foreach (var drawer in GetDeskDrawersFromGrimDesk())
-                TryAddInteractableCandidate(drawer, width, height, seen, results);
-
-            foreach (var deskItem in FindSceneObjectsOfType(_deskItemType))
-                TryAddInteractableCandidate(deskItem, width, height, seen, results);
-
-            var faxInstance = _faxMachineType != null ? GetStaticInstance(_faxMachineType) : null;
-            if (faxInstance != null)
-                TryAddInteractableCandidate(faxInstance, width, height, seen, results);
-
-            var spinnerInstance = _spinnerType != null ? GetStaticInstance(_spinnerType) : null;
-            if (spinnerInstance != null)
-                TryAddInteractableCandidate(spinnerInstance, width, height, seen, results);
-        }
-
-        foreach (var interactable in FindSceneObjectsOfType(_interactableType))
-            TryAddInteractableCandidate(interactable, width, height, seen, results);
-
-        foreach (var selectable in FindSceneObjectsOfType(_selectableType))
-            TryAddSelectableCandidate(selectable, width, height, seen, results);
-
-        _candidateCacheTick = now;
-        _candidateCacheWidth = width;
-        _candidateCacheHeight = height;
-        _candidateCacheHitAnyCollider = hitAnyCollider;
-        _candidateCache = results;
-
-        return new List<(object target, (float x, float y) screen)>(results);
-    }
-
-    private List<(object target, (float x, float y) screen)> GetDialogSelectableCandidates(int width, int height)
-    {
-        var results = new List<(object target, (float x, float y) screen)>();
-        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-        foreach (var selectable in GetDialogSelectables(requireScreen: true))
-            TryAddSelectableCandidate(selectable, width, height, seen, results);
-
-        if (results.Count == 0)
-        {
-            foreach (var selectable in GetDialogSelectables(requireScreen: false))
-                TryAddSelectableCandidate(selectable, width, height, seen, results);
-        }
-
-        return results;
     }
 
     private List<object> GetSelectableListCached()
@@ -2127,37 +2894,6 @@ public sealed class UiNavigationHandler
         }
 
         return _cachedSelectables;
-    }
-
-    private List<(object target, (float x, float y) screen)> GetRaycastSampleCandidates(int width, int height)
-    {
-        if (width <= 0 || height <= 0)
-            return new List<(object target, (float x, float y) screen)>();
-
-        const int step = 24;
-        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-        var results = new List<(object target, (float x, float y) screen)>();
-
-        for (var y = step / 2; y < height; y += step)
-        {
-            for (var x = step / 2; x < width; x += step)
-            {
-                var hit = GetInteractableAtScreenPosition(x, y);
-                if (hit == null)
-                    continue;
-
-                var resolved = ResolveInteractableForFocus(hit) ?? hit;
-                if (resolved == null)
-                    continue;
-
-                if (!seen.Add(resolved))
-                    continue;
-
-                results.Add((resolved, (x, y)));
-            }
-        }
-
-        return results;
     }
 
 
@@ -2315,96 +3051,6 @@ public sealed class UiNavigationHandler
         {
             return null;
         }
-    }
-
-    private void TryAddColliderCandidate(object collider, int width, int height, ref bool hitAnyCollider, HashSet<object> seen, List<(object target, (float x, float y) screen)> results)
-    {
-        if (collider == null || _interactableType == null)
-            return;
-
-        hitAnyCollider = true;
-
-        if (!ReflectionUtils.TryGetProperty(collider.GetType(), collider, "gameObject", out var colliderGameObject) || colliderGameObject == null)
-            return;
-
-        var getComponentInParent = colliderGameObject.GetType().GetMethod("GetComponentInParent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
-        if (getComponentInParent == null)
-            return;
-
-        var interactable = getComponentInParent.Invoke(colliderGameObject, new object[] { _interactableType });
-        if (interactable == null)
-            return;
-
-        if (!seen.Add(interactable))
-            return;
-
-        var position = GetColliderBoundsCenter(collider) ?? GetInteractableScreenPosition(interactable);
-        if (position == null)
-            return;
-
-        var screen = ToScreenPosition(position.Value, width, height);
-        if (screen == null)
-            return;
-
-        results.Add((interactable, screen.Value));
-    }
-
-    private void TryAddSelectableCandidate(object selectable, int width, int height, HashSet<object> seen, List<(object target, (float x, float y) screen)> results)
-    {
-        if (selectable == null || _selectableType == null)
-            return;
-
-        if (!seen.Add(selectable))
-            return;
-
-        if (!IsSelectableEligible(selectable, width, height, requireScreen: true))
-            return;
-
-        var gameObject = GetInteractableGameObject(selectable) ?? selectable;
-        var screen = GetUiScreenPosition(gameObject, width, height);
-        if (screen == null)
-            return;
-
-        results.Add((selectable, screen.Value));
-    }
-
-    private void TryAddInteractableCandidate(object interactable, int width, int height, HashSet<object> seen, List<(object target, (float x, float y) screen)> results)
-    {
-        if (interactable == null)
-            return;
-
-        var resolved = ResolveInteractableForFocus(interactable) ?? interactable;
-        if (resolved == null)
-            return;
-
-        var position = GetInteractableScreenPosition(resolved);
-        if (position == null && IsFaxMachine(resolved))
-        {
-            RefreshRaycastScreenCache(width, height);
-            position = GetCachedRaycastScreenPosition(resolved) ?? GetInteractableScreenPosition(resolved);
-        }
-        if (position == null)
-            return;
-
-        if (!seen.Add(resolved))
-            return;
-
-        if (!IsWithinScreen(position.Value, width, height))
-            return;
-
-        results.Add((resolved, position.Value));
-    }
-
-    private bool IsFaxMachine(object interactable)
-    {
-        return _faxMachineType != null && interactable != null && _faxMachineType.IsInstanceOfType(interactable);
-    }
-
-    private void RefreshRaycastScreenCache(int width, int height)
-    {
-        _raycastCacheTick = 0;
-        _raycastScreenCache = null;
-        EnsureRaycastScreenCache(width, height);
     }
 
     private bool IsSelectableEligible(object selectable, int width, int height, bool requireScreen)
@@ -2639,14 +3285,27 @@ public sealed class UiNavigationHandler
 
     private (float x, float y)? ToScreenPosition((float x, float y) position, int width, int height)
     {
-        var screen = WorldToScreenPoint(position);
-        if (screen != null)
-            return screen;
+        if (width <= 0 || height <= 0)
+            return null;
 
         if (position.x >= 0 && position.y >= 0 && position.x <= width && position.y <= height)
             return position;
 
-        return null;
+        var fallbackX = Clamp(position.x, 0f, width - 1);
+        var fallbackY = Clamp(position.y, 0f, height - 1);
+        return (fallbackX, fallbackY);
+    }
+
+    private (float x, float y)? TryProjectScreenPosition((float x, float y, float z) world)
+    {
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+
+        var screen = WorldToScreenPoint(world) ?? WorldToScreenPointWithCamera(world);
+        if (screen != null)
+            return screen;
+
+        return ToScreenPosition((world.x, world.y), width, height);
     }
 
     private (float x, float y)? GetUiScreenPosition(object gameObject, int width, int height)
@@ -2966,7 +3625,19 @@ public sealed class UiNavigationHandler
             yield break;
 
         foreach (var item in result)
+        {
+            if (item == null)
+                continue;
+
+            if (!IsInAllowedScene(item))
+                continue;
+
+            var go = GetInteractableGameObject(item) ?? GetGameObjectFromComponent(item) ?? GetMemberValue(item, "gameObject");
+            if (go != null && !IsGameObjectActive(go))
+                continue;
+
             yield return item;
+        }
     }
 
     private object GetComponentByType(object gameObject, Type type)
@@ -3024,6 +3695,113 @@ public sealed class UiNavigationHandler
 
     private (float x, float y)? GetMousePosition()
     {
+        if (_virtualCursorActive)
+            return _virtualCursorPos;
+
+        return GetRawMousePosition();
+    }
+
+    private bool TryGetElevatorSceneName(out string sceneName)
+    {
+        sceneName = null;
+
+        if (_elevatorManagerType != null)
+        {
+            var instance = GetStaticInstance(_elevatorManagerType);
+            if (instance != null)
+            {
+                var changing = GetMemberValue(instance, "bIsChangingScene");
+                if (changing is bool changingScene && changingScene)
+                    return false;
+
+                var method = _elevatorManagerType.GetMethod("GetCurrentScene", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (method != null)
+                {
+                    try
+                    {
+                        var sceneObj = method.Invoke(instance, null);
+                        if (sceneObj != null)
+                        {
+                            sceneName = sceneObj.ToString();
+                            return true;
+                        }
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryGetActiveUnitySceneName(out string sceneName)
+    {
+        sceneName = null;
+        if (_sceneManagerType == null || _sceneType == null)
+            return false;
+
+        try
+        {
+            var method = _sceneManagerType.GetMethod("GetActiveScene", BindingFlags.Public | BindingFlags.Static);
+            if (method == null)
+                return false;
+
+            var scene = method.Invoke(null, null);
+            if (scene == null)
+                return false;
+
+            var nameProp = scene.GetType().GetProperty("name", BindingFlags.Instance | BindingFlags.Public);
+            sceneName = nameProp?.GetValue(scene) as string;
+            return !string.IsNullOrWhiteSpace(sceneName);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsInAllowedScene(object target)
+    {
+        if (target == null || _allowedSceneNames.Count == 0)
+            return true;
+
+        var go = GetInteractableGameObject(target) ?? GetGameObjectFromComponent(target) ?? GetMemberValue(target, "gameObject");
+        if (go == null)
+            return true;
+
+        var sceneName = GetGameObjectSceneName(go);
+        if (string.IsNullOrWhiteSpace(sceneName))
+            return true;
+
+        return _allowedSceneNames.Contains(sceneName);
+    }
+
+    private string GetGameObjectSceneName(object gameObject)
+    {
+        if (gameObject == null)
+            return null;
+
+        try
+        {
+            var sceneProp = gameObject.GetType().GetProperty("scene", BindingFlags.Instance | BindingFlags.Public);
+            var scene = sceneProp?.GetValue(gameObject);
+            if (scene == null)
+                return null;
+
+            var nameProp = scene.GetType().GetProperty("name", BindingFlags.Instance | BindingFlags.Public);
+            return nameProp?.GetValue(scene) as string;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private (float x, float y)? GetRawMousePosition()
+    {
         if (_inputType == null || _vector3Type == null)
             return null;
 
@@ -3074,7 +3852,7 @@ public sealed class UiNavigationHandler
         if (_cameraType == null || _physics2DType == null || _vector3Type == null || _interactableType == null || _collider2DType == null)
             return null;
 
-        var camera = GetMainCamera();
+        var camera = GetMainCamera() ?? GetAnyCamera();
         if (camera == null)
             return null;
 
@@ -3125,7 +3903,8 @@ public sealed class UiNavigationHandler
             if (interactable != null)
             {
                 var resolved = ResolveInteractableForFocus(interactable);
-                return FilterDialogInteractable(resolved);
+                resolved = FilterDialogInteractable(resolved);
+                return IsInAllowedScene(resolved) ? resolved : null;
             }
 
             var overlapPoint = _physics2DType.GetMethod("OverlapPoint", BindingFlags.Public | BindingFlags.Static, null, new[] { _vector2Type }, null);
@@ -3148,7 +3927,59 @@ public sealed class UiNavigationHandler
 
             var overlapInteractable = overlapComponentInParent.Invoke(overlapGameObject, new object[] { _interactableType });
             var resolvedOverlap = ResolveInteractableForFocus(overlapInteractable);
-            return FilterDialogInteractable(resolvedOverlap);
+            resolvedOverlap = FilterDialogInteractable(resolvedOverlap);
+            return IsInAllowedScene(resolvedOverlap) ? resolvedOverlap : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private object GetShopItemAtScreenPosition(float x, float y)
+    {
+        if (_cameraType == null || _physics2DType == null || _vector3Type == null || _vector2Type == null || _shopItemType == null || _collider2DType == null)
+            return null;
+
+        var camera = GetMainCamera() ?? GetAnyCamera();
+        if (camera == null)
+            return null;
+
+        try
+        {
+            var screenVector = Activator.CreateInstance(_vector3Type, x, y, 0f);
+            var screenToWorld = _cameraType.GetMethod("ScreenToWorldPoint", BindingFlags.Instance | BindingFlags.Public, null, new[] { _vector3Type }, null);
+            if (screenToWorld == null)
+                return null;
+
+            var world = screenToWorld.Invoke(camera, new[] { screenVector });
+            if (world == null)
+                return null;
+
+            var world2 = GetVector2FromValue(world);
+            if (world2 == null)
+                return null;
+
+            var point = Activator.CreateInstance(_vector2Type, world2.Value.x, world2.Value.y);
+            var overlapPoint = _physics2DType.GetMethod("OverlapPoint", BindingFlags.Public | BindingFlags.Static, null, new[] { _vector2Type }, null);
+            if (overlapPoint == null)
+                return null;
+
+            var overlap = overlapPoint.Invoke(null, new[] { point });
+            if (overlap == null)
+                return null;
+
+            var overlapGameObjectProp = overlap.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
+            var overlapGameObject = overlapGameObjectProp?.GetValue(overlap);
+            if (overlapGameObject == null)
+                return null;
+
+            var getComponentInParent = overlapGameObject.GetType().GetMethod("GetComponentInParent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            if (getComponentInParent == null)
+                return null;
+
+            var shopItem = getComponentInParent.Invoke(overlapGameObject, new object[] { _shopItemType });
+            return IsInAllowedScene(shopItem) ? shopItem : null;
         }
         catch
         {
@@ -3308,7 +4139,13 @@ public sealed class UiNavigationHandler
 
     private bool IsPaperwork(object interactable)
     {
-        return _paperworkType != null && interactable != null && _paperworkType.IsInstanceOfType(interactable);
+        if (interactable == null)
+            return false;
+
+        if (_paperworkType != null && _paperworkType.IsInstanceOfType(interactable))
+            return true;
+
+        return string.Equals(interactable.GetType().Name, "Paperwork", StringComparison.Ordinal);
     }
 
     private bool IsPaperworkMark(object interactable)
@@ -3754,6 +4591,8 @@ public sealed class UiNavigationHandler
                 SetInteractableFocus(fallback);
                 return true;
             }
+
+            return false;
         }
         catch
         {
@@ -3865,6 +4704,26 @@ public sealed class UiNavigationHandler
 
     private void SubmitInteractable()
     {
+        var uiObject = GetUiRaycastGameObject();
+        if (uiObject != null)
+        {
+            SetUiSelected(uiObject);
+            _lastFocusedInteractable = uiObject;
+            TryInvokeUiClick(uiObject);
+            return;
+        }
+
+        if (_virtualCursorActive)
+        {
+            var mousePosition = GetMousePosition();
+            if (mousePosition != null)
+            {
+                var hit = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
+                if (hit != null)
+                    _lastFocusedInteractable = hit;
+            }
+        }
+
         if (_lastFocusedInteractable == null)
         {
             _lastFocusedInteractable = GetInputManagerLastHit();
@@ -3882,7 +4741,18 @@ public sealed class UiNavigationHandler
         }
 
         if (_lastFocusedInteractable == null)
+        {
+            var mousePosition = GetMousePosition();
+            if (mousePosition != null)
+                _lastFocusedInteractable = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
+        }
+
+        if (_lastFocusedInteractable == null)
             return;
+
+        var paperworkParent = GetPaperworkParent(_lastFocusedInteractable) ?? GetPaperworkFromHierarchy(_lastFocusedInteractable);
+        if (paperworkParent != null)
+            _lastFocusedInteractable = paperworkParent;
 
         if (TryErasePaperworkMark(_lastFocusedInteractable))
             return;
@@ -4000,9 +4870,28 @@ public sealed class UiNavigationHandler
         if (slider == null)
             return false;
 
-        var min = GetFloatMember(slider, "minValue", 0f);
-        var max = GetFloatMember(slider, "maxValue", 1f);
-        var value = GetFloatMember(slider, "value", min);
+        var min = 0f;
+        var max = 1f;
+        var value = 0f;
+        var minObj = GetMemberValue(slider, "minValue");
+        if (minObj is float minF) min = minF;
+        else if (minObj is double minD) min = (float)minD;
+        else if (minObj is int minI) min = minI;
+        else if (minObj is long minL) min = minL;
+        else if (minObj is decimal minM) min = (float)minM;
+        var maxObj = GetMemberValue(slider, "maxValue");
+        if (maxObj is float maxF) max = maxF;
+        else if (maxObj is double maxD) max = (float)maxD;
+        else if (maxObj is int maxI) max = maxI;
+        else if (maxObj is long maxL) max = maxL;
+        else if (maxObj is decimal maxM) max = (float)maxM;
+        var valueObj = GetMemberValue(slider, "value");
+        if (valueObj is float valueF) value = valueF;
+        else if (valueObj is double valueD) value = (float)valueD;
+        else if (valueObj is int valueI) value = valueI;
+        else if (valueObj is long valueL) value = valueL;
+        else if (valueObj is decimal valueM) value = (float)valueM;
+        else value = min;
         var step = (max - min) * 0.05f;
         if (step <= 0f)
             step = 0.05f;
@@ -4010,7 +4899,8 @@ public sealed class UiNavigationHandler
         value += direction == NavigationDirection.Right ? step : -step;
         value = Clamp(value, Math.Min(min, max), Math.Max(min, max));
 
-        if (GetBoolMember(slider, "wholeNumbers", false))
+        var wholeNumbersObj = GetMemberValue(slider, "wholeNumbers");
+        if (wholeNumbersObj is bool wholeNumbers && wholeNumbers)
             value = (float)Math.Round(value);
 
         return SetFloatMember(slider, "value", value);
@@ -4037,9 +4927,28 @@ public sealed class UiNavigationHandler
         if (slider == null)
             return false;
 
-        var min = GetFloatMember(slider, "minValue", 0f);
-        var max = GetFloatMember(slider, "maxValue", 1f);
-        var value = GetFloatMember(slider, "value", min);
+        var min = 0f;
+        var max = 1f;
+        var value = 0f;
+        var minObj = GetMemberValue(slider, "minValue");
+        if (minObj is float minF) min = minF;
+        else if (minObj is double minD) min = (float)minD;
+        else if (minObj is int minI) min = minI;
+        else if (minObj is long minL) min = minL;
+        else if (minObj is decimal minM) min = (float)minM;
+        var maxObj = GetMemberValue(slider, "maxValue");
+        if (maxObj is float maxF) max = maxF;
+        else if (maxObj is double maxD) max = (float)maxD;
+        else if (maxObj is int maxI) max = maxI;
+        else if (maxObj is long maxL) max = maxL;
+        else if (maxObj is decimal maxM) max = (float)maxM;
+        var valueObj = GetMemberValue(slider, "value");
+        if (valueObj is float valueF) value = valueF;
+        else if (valueObj is double valueD) value = (float)valueD;
+        else if (valueObj is int valueI) value = valueI;
+        else if (valueObj is long valueL) value = valueL;
+        else if (valueObj is decimal valueM) value = (float)valueM;
+        else value = min;
         var step = (max - min) * 0.05f;
         if (step <= 0f)
             step = 0.05f;
@@ -4047,7 +4956,8 @@ public sealed class UiNavigationHandler
         value += direction == NavigationDirection.Right ? step : -step;
         value = Clamp(value, Math.Min(min, max), Math.Max(min, max));
 
-        if (GetBoolMember(slider, "wholeNumbers", false))
+        var wholeNumbersObj = GetMemberValue(slider, "wholeNumbers");
+        if (wholeNumbersObj is bool wholeNumbers && wholeNumbers)
             value = (float)Math.Round(value);
 
         if (!SetFloatMember(slider, "value", value))
@@ -4374,6 +5284,39 @@ public sealed class UiNavigationHandler
 
     private (float x, float y)? GetInteractableScreenPosition(object interactable)
     {
+        if (IsPaperwork(interactable))
+        {
+            var paperCollider = GetMemberValue(interactable, "ColliderPaperwork");
+            var paperCenter = GetColliderBoundsCenter(paperCollider);
+            if (paperCenter != null)
+            {
+                var projected = TryProjectScreenPosition((paperCenter.Value.x, paperCenter.Value.y, 0f));
+                if (projected != null)
+                    return projected;
+            }
+
+            var paperGo = GetInteractableGameObject(interactable);
+            var paperPos = paperGo != null ? GetTransformPosition3(paperGo) : null;
+            if (paperPos != null)
+            {
+                var projected = TryProjectScreenPosition(paperPos.Value);
+                if (projected != null)
+                    return projected;
+            }
+
+            foreach (var fieldName in new[] { "PositionDesktop", "OriginPosition", "PositionFocus" })
+            {
+                var fieldValue = GetMemberValue(interactable, fieldName);
+                var vector3 = GetVector3FromValue(fieldValue);
+                if (vector3 != null)
+                {
+                    var projected = TryProjectScreenPosition(vector3.Value);
+                    if (projected != null)
+                        return projected;
+                }
+            }
+        }
+
         var gameObject = GetInteractableGameObject(interactable);
         var width = GetScreenDimension("width");
         var height = GetScreenDimension("height");
@@ -4383,42 +5326,38 @@ public sealed class UiNavigationHandler
             if (uiScreen != null)
                 return uiScreen;
         }
+
         var position3 = gameObject != null ? GetTransformPosition3(gameObject) : null;
         if (position3 == null)
             position3 = GetTransformPosition3(interactable);
         if (position3 != null)
         {
-            var screen3 = WorldToScreenPoint(position3.Value);
-            if (screen3 != null)
-                return screen3;
+            var projected = TryProjectScreenPosition(position3.Value);
+            if (projected != null)
+                return projected;
         }
 
         var position = gameObject != null ? GetTransformPosition(gameObject) : null;
-
         if (position == null)
             position = GetTransformPosition(interactable);
-
-        if (position == null && IsDeskItem(interactable))
-            position = GetDeskItemStatusPosition(interactable, gameObject);
-
-        if (position == null)
-            position = GetDeskItemOriginPosition(interactable);
 
         if (position == null && IsDrawer(interactable))
             position = GetDrawerPosition(interactable);
 
-        if (position == null && gameObject != null)
-            position = GetColliderBoundsCenterFromGameObject(gameObject);
-
-        if (position == null && gameObject != null)
-            position = GetRendererBoundsCenterFromGameObject(gameObject);
+        if (position == null && IsDrawer(interactable))
+        {
+            var drawerCollider = GetMemberValue(interactable, "Collider");
+            var drawerCenter = GetColliderBoundsCenter(drawerCollider);
+            if (drawerCenter != null)
+                position = drawerCenter;
+        }
 
         if (position == null)
             return null;
 
-        var screen = WorldToScreenPoint(position.Value);
-        if (screen != null)
-            return screen;
+        var projected2d = TryProjectScreenPosition((position.Value.x, position.Value.y, 0f));
+        if (projected2d != null)
+            return projected2d;
 
         if (gameObject != null)
         {
@@ -4427,55 +5366,8 @@ public sealed class UiNavigationHandler
                 return uiFallback;
         }
 
-        var cached = GetCachedRaycastScreenPosition(interactable);
-        if (cached != null)
-            return cached;
-
         if (width > 0 && height > 0)
             return ToScreenPosition(position.Value, width, height);
-
-        return null;
-    }
-
-    private void EnsureRaycastScreenCache(int width, int height)
-    {
-        var now = Environment.TickCount;
-        if (_raycastScreenCache != null && unchecked(now - _raycastCacheTick) < 60000)
-            return;
-
-        _raycastCacheTick = now;
-        _raycastScreenCache = new Dictionary<object, (float x, float y)>(ReferenceEqualityComparer.Instance);
-
-        const int step = 24;
-        for (var y = step / 2f; y < height; y += step)
-        {
-            for (var x = step / 2f; x < width; x += step)
-            {
-                var hit = GetInteractableAtScreenPosition(x, y);
-                if (hit == null)
-                    continue;
-
-                var resolved = ResolveInteractableForFocus(hit) ?? hit;
-                if (resolved == null)
-                    continue;
-
-                if (!_raycastScreenCache.ContainsKey(resolved))
-                    _raycastScreenCache[resolved] = (x, y);
-            }
-        }
-    }
-
-    private (float x, float y)? GetCachedRaycastScreenPosition(object interactable)
-    {
-        if (_raycastScreenCache == null || interactable == null)
-            return null;
-
-        var resolved = ResolveInteractableForFocus(interactable) ?? interactable;
-        if (resolved == null)
-            return null;
-
-        if (_raycastScreenCache.TryGetValue(resolved, out var pos))
-            return pos;
 
         return null;
     }
@@ -4494,63 +5386,6 @@ public sealed class UiNavigationHandler
         return GetTransformPosition(gameObject);
     }
 
-    private (float x, float y)? GetDeskItemStatusPosition(object interactable, object gameObject)
-    {
-        if (_deskItemType == null || interactable == null || !_deskItemType.IsInstanceOfType(interactable))
-            return null;
-
-        try
-        {
-            var statusField = _deskItemType.GetField("ItemStatus", BindingFlags.Instance | BindingFlags.Public);
-            var status = statusField?.GetValue(interactable);
-            if (status == null)
-                return null;
-
-            var posField = status.GetType().GetField("Position", BindingFlags.Instance | BindingFlags.Public);
-            var posValue = posField?.GetValue(status);
-            var local = GetVector2FromValue(posValue);
-            if (local == null)
-                return null;
-
-            var transform = gameObject != null ? GetTransform(gameObject) : null;
-            if (transform != null && _vector3Type != null)
-            {
-                var method = transform.GetType().GetMethod("TransformPoint", BindingFlags.Instance | BindingFlags.Public, null, new[] { _vector3Type }, null);
-                if (method != null)
-                {
-                    var ctor = _vector3Type.GetConstructor(new[] { typeof(float), typeof(float), typeof(float) });
-                    var vector = ctor?.Invoke(new object[] { local.Value.x, local.Value.y, 0f });
-                    var world = method.Invoke(transform, new[] { vector });
-                    var worldPos = GetVector2FromValue(world);
-                    if (worldPos != null)
-                        return worldPos;
-                }
-            }
-
-            return local;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private (float x, float y)? GetDeskItemOriginPosition(object interactable)
-    {
-        if (_deskItemType == null || interactable == null || !_deskItemType.IsInstanceOfType(interactable))
-            return null;
-
-        try
-        {
-            var field = _deskItemType.GetField("OriginPosition", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            var value = field?.GetValue(interactable);
-            return GetVector2FromValue(value);
-        }
-        catch
-        {
-            return null;
-        }
-    }
 
     private (float x, float y)? GetColliderBoundsCenterFromGameObject(object gameObject)
     {
@@ -4787,6 +5622,49 @@ public sealed class UiNavigationHandler
         return WorldToScreenPoint((world.x, world.y, 0f));
     }
 
+    private (float x, float y)? WorldToScreenPointWithCamera((float x, float y, float z) world)
+    {
+        var camera = GetMainCamera() ?? GetAnyCamera();
+        if (camera == null)
+            return null;
+
+        try
+        {
+            var method = camera.GetType().GetMethod("WorldToScreenPoint", BindingFlags.Instance | BindingFlags.Public, null, new[] { _vector3Type ?? TypeResolver.Get("UnityEngine.Vector3") }, null);
+            if (method == null)
+                return null;
+
+            var vector3Type = _vector3Type ?? TypeResolver.Get("UnityEngine.Vector3");
+            if (vector3Type == null)
+                return null;
+
+            var ctor = vector3Type.GetConstructor(new[] { typeof(float), typeof(float), typeof(float) });
+            if (ctor == null)
+                return null;
+
+            var vector = ctor.Invoke(new object[] { world.x, world.y, world.z });
+            var result = method.Invoke(camera, new[] { vector });
+            if (result == null)
+                return null;
+
+            var xProp = result.GetType().GetProperty("x", BindingFlags.Instance | BindingFlags.Public);
+            var yProp = result.GetType().GetProperty("y", BindingFlags.Instance | BindingFlags.Public);
+            if (xProp == null || yProp == null)
+                return null;
+
+            var xVal = xProp.GetValue(result);
+            var yVal = yProp.GetValue(result);
+            if (xVal is float x && yVal is float y)
+                return (x, y);
+        }
+        catch
+        {
+            return null;
+        }
+
+        return null;
+    }
+
     private void SetInteractableFocus(object interactable)
     {
         if (interactable == null)
@@ -4804,13 +5682,6 @@ public sealed class UiNavigationHandler
         _lastFocusedInteractable = interactable;
         _keyboardFocusActive = true;
         _keyboardFocusUntilTick = Environment.TickCount + 1500;
-        var focusPosition = GetInteractableScreenPosition(interactable);
-        if (focusPosition != null)
-        {
-            _virtualCursorX = focusPosition.Value.x;
-            _virtualCursorY = focusPosition.Value.y;
-            _virtualCursorInitialized = true;
-        }
         if (IsInteractableInstance(interactable))
         {
             CallInteractableMethod(interactable, "Hover");
@@ -4821,6 +5692,12 @@ public sealed class UiNavigationHandler
             SetUiSelected(interactable);
         }
         var hoverText = GetHoverText(interactable);
+        if (string.IsNullOrWhiteSpace(hoverText))
+        {
+            var shopItem = ResolveShopItem(interactable);
+            if (shopItem != null)
+                hoverText = GetHoverText(shopItem);
+        }
         UpdateHudHoverText(hoverText);
         AnnounceHoverText(hoverText, interactable);
     }
@@ -4899,9 +5776,94 @@ public sealed class UiNavigationHandler
         if (_screenreader == null)
             return;
 
-        var shopName = GetShopItemName(interactable);
+        var built = BuildHoverText(interactable, hoverText);
+        if (string.IsNullOrWhiteSpace(built))
+            return;
+
+        if (IsDialogActive())
+            return;
+
+        if (_screenreader.ShouldSuppressHover() || _screenreader.IsBusy)
+            return;
+
+        _screenreader.Announce(built);
+        return;
+    }
+
+    private string BuildHoverText(object interactable, string hoverText)
+    {
+        if (!string.IsNullOrWhiteSpace(hoverText) && IsMoneyNotificationText(hoverText))
+            return null;
+
+        hoverText = StripLeadingMoneySentence(hoverText);
+
+        var shopItem = ResolveShopItem(interactable) ?? interactable;
+        if (IsShopActive())
+        {
+            var shopHover = GetHudHoverShopText();
+            if (string.IsNullOrWhiteSpace(shopHover))
+                shopHover = hoverText;
+
+            shopHover = SanitizeHoverText(shopHover);
+            shopHover = StripLeadingMoneySentence(shopHover);
+            if (!string.IsNullOrWhiteSpace(shopHover) && !LooksLikeValueText(shopHover))
+            {
+                var nameText = GetShopUiNameText();
+                var priceText = GetShopUiPriceText();
+                var parts = new List<string>();
+                if (!string.IsNullOrWhiteSpace(nameText))
+                    parts.Add(SanitizeHoverText(nameText));
+                parts.Add(shopHover);
+                if (!string.IsNullOrWhiteSpace(priceText))
+                    parts.Add("Price " + priceText);
+                return string.Join(". ", parts);
+            }
+        }
+        else
+        {
+            var hudHover = GetHudHoverText();
+            hudHover = SanitizeHoverText(hudHover);
+            hudHover = StripLeadingMoneySentence(hudHover);
+            if (!string.IsNullOrWhiteSpace(hudHover) && !LooksLikeValueText(hudHover))
+                return hudHover;
+        }
+
+        var shopDescription = GetShopItemDescription(shopItem);
+        var shopName = GetShopItemName(shopItem);
         var name = SanitizeHoverText(GetGameObjectName(interactable));
         hoverText = SanitizeHoverText(hoverText);
+        shopDescription = SanitizeHoverText(shopDescription);
+        if (string.IsNullOrWhiteSpace(shopName))
+            shopName = GetFriendlyInteractableName(interactable);
+        if (string.IsNullOrWhiteSpace(shopName) && shopItem != null)
+            shopName = GetShopDisplayNameFromInstance();
+        if (string.IsNullOrWhiteSpace(shopName) && IsShopActive())
+            shopName = GetShopUiNameText();
+
+        if (IsShopActive())
+        {
+            var hudShop = GetHudHoverShopText();
+            if (!string.IsNullOrWhiteSpace(hudShop) && IsShopDescriptionCandidate(hudShop))
+            {
+                if (string.IsNullOrWhiteSpace(shopDescription) || IsLocalizationKey(shopDescription))
+                    shopDescription = hudShop;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(shopDescription) && !string.IsNullOrWhiteSpace(hoverText))
+        {
+            var extracted = ExtractShopDescriptionFromHoverText(hoverText, shopName);
+            if (!string.IsNullOrWhiteSpace(extracted))
+                shopDescription = extracted;
+        }
+
+        if (!string.IsNullOrWhiteSpace(shopDescription))
+        {
+            if (string.IsNullOrWhiteSpace(hoverText))
+                hoverText = shopDescription;
+            else if (hoverText.IndexOf(shopDescription, StringComparison.OrdinalIgnoreCase) < 0)
+                hoverText = $"{shopDescription}. {hoverText}";
+        }
 
         if (!string.IsNullOrWhiteSpace(shopName))
         {
@@ -4912,7 +5874,7 @@ public sealed class UiNavigationHandler
             name = null;
         }
 
-        var shopPrice = GetShopItemPriceText(interactable);
+        var shopPrice = GetShopItemPriceText(shopItem);
         if (!string.IsNullOrWhiteSpace(shopPrice))
         {
             if (string.IsNullOrWhiteSpace(hoverText))
@@ -4933,23 +5895,95 @@ public sealed class UiNavigationHandler
         if (string.IsNullOrWhiteSpace(hoverText))
             hoverText = GetFriendlyInteractableName(interactable) ?? name;
 
+        if (IsShopActive() && !string.IsNullOrWhiteSpace(hoverText) && LooksLikeValueText(hoverText))
+        {
+            if (!string.IsNullOrWhiteSpace(shopName) || !string.IsNullOrWhiteSpace(shopDescription))
+                hoverText = $"{shopName ?? shopDescription}";
+            else
+                hoverText = null;
+        }
+
         if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(hoverText)
             && hoverText.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0)
         {
             hoverText = $"{name}. {hoverText}";
         }
 
-        if (string.IsNullOrWhiteSpace(hoverText))
-            return;
+        hoverText = StripLeadingMoneySentence(hoverText);
 
-        if (IsDialogActive())
-            return;
-
-        if (_screenreader.ShouldSuppressHover() || _screenreader.IsBusy)
-            return;
-
-        _screenreader.Announce(hoverText);
+        return hoverText;
     }
+
+    private string StripLeadingMoneySentence(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return text;
+
+        var trimmed = text.Trim();
+        var sign = trimmed[0] == '+' || trimmed[0] == '-' ? 1 : 0;
+        var idx = sign;
+        while (idx < trimmed.Length && char.IsDigit(trimmed[idx]))
+            idx++;
+
+        if (idx == sign)
+            return text;
+
+        while (idx < trimmed.Length && char.IsWhiteSpace(trimmed[idx]))
+            idx++;
+
+        if (idx < trimmed.Length && trimmed[idx] == '.')
+        {
+            var remainder = trimmed.Substring(idx + 1).TrimStart();
+            return string.IsNullOrWhiteSpace(remainder) ? null : remainder;
+        }
+
+        return text;
+    }
+
+    private bool IsMoneyNotificationText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var trimmed = text.Trim();
+        if (trimmed.StartsWith("+", StringComparison.Ordinal) || trimmed.StartsWith("-", StringComparison.Ordinal))
+            trimmed = trimmed.Substring(1).TrimStart();
+
+        if (trimmed.Length == 0)
+            return false;
+
+        foreach (var ch in trimmed)
+        {
+            if (!char.IsDigit(ch))
+                return false;
+        }
+
+        return true;
+    }
+
+    private string GetHudHoverText()
+    {
+        if (_hudManagerType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _hudManagerType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textHoverField = _hudManagerType.GetField("TextHover", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textHover = textHoverField?.GetValue(instance);
+            var raw = ReadStringValue(GetMemberValue(textHover, "text"));
+            return SanitizeHoverText(raw);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
 
     private string GetCalendarDayText(object interactable)
     {
@@ -5007,24 +6041,78 @@ public sealed class UiNavigationHandler
         if (interactable == null)
             return null;
 
-        var type = interactable.GetType();
-        if (!string.Equals(type.Name, "ShopItem", StringComparison.Ordinal))
+        if (!IsShopItem(interactable))
             return null;
 
-        var itemData = GetMemberValue(interactable, "ItemData");
-        if (itemData == null)
-            return null;
+        var itemData = GetMemberValue(interactable, "ItemData") ?? GetMemberValue(interactable, "itemData");
+        var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
+        var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
+        var source = itemDataObj ?? itemData;
 
-        var template = GetMemberValue(itemData, "Template");
-        if (template == null)
-            return null;
+        if (source != null)
+        {
+            foreach (var field in new[]
+                     {
+                         "item_name", "itemName", "ItemName",
+                         "Unresolved_item_name", "LocaKey_item_name",
+                         "name", "Name",
+                         "display_name", "displayName", "DisplayName",
+                         "item_title", "itemTitle", "ItemTitle",
+                         "title", "Title",
+                         "item_name_key", "itemNameKey", "name_key", "nameKey", "NameKey"
+                     })
+            {
+                var value = ReadStringValue(GetMemberValue(source, field));
+                if (!string.IsNullOrWhiteSpace(value) && IsShopNameCandidate(value))
+                    return value;
+            }
+        }
 
-        var itemDataObj = GetMemberValue(template, "item_data");
-        if (itemDataObj == null)
-            return null;
+        var uiName = GetShopUiNameText();
+        if (!string.IsNullOrWhiteSpace(uiName) && IsShopNameCandidate(uiName))
+            return uiName;
 
-        var itemName = GetMemberValue(itemDataObj, "item_name") as string;
-        return SanitizeHoverText(itemName);
+        var gameObject = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
+        var text = FindFirstUsefulTextInChildren(gameObject);
+        if (string.IsNullOrWhiteSpace(text))
+            text = FindNearestText(gameObject);
+        if (string.IsNullOrWhiteSpace(text))
+            text = FindSiblingLabelText(gameObject);
+        text = SanitizeHoverText(text);
+        if (!string.IsNullOrWhiteSpace(text) && IsShopNameCandidate(text))
+            return text;
+
+        return null;
+    }
+
+    private bool IsShopItemOwned(object interactable)
+    {
+        if (!IsShopItem(interactable))
+            return true;
+
+        try
+        {
+            var itemData = GetMemberValue(interactable, "ItemData");
+            if (itemData == null)
+                return false;
+
+            var template = GetMemberValue(itemData, "Template");
+            var itemDataObj = GetMemberValue(template, "item_data");
+            var variable = GetMemberValue(itemDataObj, "item_variable");
+            if (variable == null)
+                return false;
+
+            var method = variable.GetType().GetMethod("CallScript", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            var result = method.Invoke(variable, null);
+            return result is bool owned && owned;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private string GetShopItemPriceText(object interactable)
@@ -5032,15 +6120,14 @@ public sealed class UiNavigationHandler
         if (interactable == null)
             return null;
 
-        var type = interactable.GetType();
-        if (!string.Equals(type.Name, "ShopItem", StringComparison.Ordinal))
+        if (!IsShopItem(interactable))
             return null;
 
         try
         {
-            var method = type.GetMethod("GetPrice", BindingFlags.Instance | BindingFlags.Public);
+            var method = interactable.GetType().GetMethod("GetPrice", BindingFlags.Instance | BindingFlags.Public);
             if (method == null)
-                return null;
+                throw new MissingMethodException();
 
             var result = method.Invoke(interactable, null);
             if (result is int price)
@@ -5052,10 +6139,436 @@ public sealed class UiNavigationHandler
         }
         catch
         {
+            // Fall back to known price fields.
+        }
+
+        var itemData = GetMemberValue(interactable, "ItemData") ?? GetMemberValue(interactable, "itemData");
+        var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
+        var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
+        var source = itemDataObj ?? itemData ?? interactable;
+
+        foreach (var field in new[]
+                 {
+                     "price", "Price", "item_price", "itemPrice", "ItemPrice",
+                     "cost", "Cost", "item_cost", "itemCost", "ItemCost"
+                 })
+        {
+            var value = GetMemberValue(source, field);
+            if (value is int price)
+                return "Price " + price;
+            if (value is long longPrice)
+                return "Price " + longPrice;
+            if (value is float f)
+                return "Price " + Math.Round(f);
+            if (value is double d)
+                return "Price " + Math.Round(d);
+            if (value is decimal dec)
+                return "Price " + Math.Round(dec);
+
+            var text = ReadStringValue(value);
+            if (!string.IsNullOrWhiteSpace(text) && double.TryParse(text, out var parsed))
+                return "Price " + Math.Round(parsed);
+        }
+
+        var uiPrice = GetShopUiPriceText();
+        if (!string.IsNullOrWhiteSpace(uiPrice))
+            return "Price " + uiPrice;
+
+        return null;
+    }
+
+    private string GetShopItemDescription(object interactable)
+    {
+        if (interactable == null || !IsShopItem(interactable))
             return null;
+
+        var itemData = GetMemberValue(interactable, "ItemData") ?? GetMemberValue(interactable, "itemData");
+        var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
+        var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
+        var source = itemDataObj ?? itemData;
+
+        if (source != null)
+        {
+            foreach (var field in new[]
+                     {
+                         "item_description", "item_desc", "description", "desc", "itemDescription", "itemDesc",
+                         "Unresolved_item_description", "LocaKey_item_description",
+                         "item_description_key", "itemDescKey", "item_desc_key", "description_key", "desc_key"
+                     })
+            {
+                var value = ReadStringValue(GetMemberValue(source, field));
+                if (!string.IsNullOrWhiteSpace(value) && IsShopDescriptionCandidate(value) && !IsLocalizationKey(value))
+                    return value;
+            }
+
+            foreach (var field in new[]
+                     {
+                         "item_flavour_text_first", "item_flavour_text_second", "item_flavour_text_third",
+                         "Unresolved_item_flavour_text_first", "Unresolved_item_flavour_text_second", "Unresolved_item_flavour_text_third",
+                         "LocaKey_item_flavour_text_first", "LocaKey_item_flavour_text_second", "LocaKey_item_flavour_text_third"
+                     })
+            {
+                var value = ReadStringValue(GetMemberValue(source, field));
+                if (!string.IsNullOrWhiteSpace(value) && IsShopDescriptionCandidate(value) && !IsLocalizationKey(value))
+                    return value;
+            }
+        }
+
+        var gameObject = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
+        var text = FindFirstUsefulTextInChildren(gameObject);
+        if (string.IsNullOrWhiteSpace(text))
+            text = FindNearestText(gameObject);
+        if (string.IsNullOrWhiteSpace(text))
+            text = FindSiblingLabelText(gameObject);
+        if (!string.IsNullOrWhiteSpace(text) && IsShopDescriptionCandidate(text))
+            return text;
+
+        return null;
+    }
+
+    private string GetShopDisplayNameFromInstance()
+    {
+        if (_shopType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textNameField = _shopType.GetField("TextName", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textName = textNameField?.GetValue(instance);
+            var text = ReadStringValue(GetMemberValue(textName, "text"));
+            return SanitizeHoverText(text);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string GetShopUiNameText()
+    {
+        if (_shopType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textNameField = _shopType.GetField("TextName", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textName = textNameField?.GetValue(instance);
+            return SanitizeHoverText(ReadStringValue(GetMemberValue(textName, "text")));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string GetShopUiPriceText()
+    {
+        if (_shopType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textPriceField = _shopType.GetField("TextPrice", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textPrice = textPriceField?.GetValue(instance);
+            var raw = SanitizeHoverText(ReadStringValue(GetMemberValue(textPrice, "text")));
+            if (string.IsNullOrWhiteSpace(raw))
+                return null;
+
+            var digits = new string(raw.Where(char.IsDigit).ToArray());
+            return string.IsNullOrWhiteSpace(digits) ? raw.Trim() : digits;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string GetHudHoverShopText()
+    {
+        if (_hudManagerType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _hudManagerType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textHoverShopField = _hudManagerType.GetField("TextHoverShop", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textHoverShop = textHoverShopField?.GetValue(instance);
+            var raw = ReadStringValue(GetMemberValue(textHoverShop, "text"));
+            return SanitizeHoverText(raw);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private bool IsShopActive()
+    {
+        if (_shopType == null)
+            return false;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return false;
+
+            var go = GetMemberValue(instance, "gameObject");
+            return go != null && IsGameObjectActive(go);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private string ReadStringValue(object value)
+    {
+        if (value == null)
+            return null;
+
+        if (value is string raw)
+            return SanitizeHoverText(raw);
+
+        var type = value.GetType();
+        foreach (var name in new[]
+                 {
+                     "Value", "value", "Text", "text", "String", "string",
+                     "LocalizedString", "localizedString",
+                     "Key", "key", "m_key",
+                     "Term", "term", "mTerm", "m_term"
+                 })
+        {
+            var memberValue = GetMemberValue(value, name);
+            if (memberValue is string memberText)
+                return SanitizeHoverText(memberText);
+        }
+
+        try
+        {
+            var method = type.GetMethod("GetLocalizedString", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (method != null)
+            {
+                var result = method.Invoke(value, null) as string;
+                if (!string.IsNullOrWhiteSpace(result))
+                    return SanitizeHoverText(result);
+            }
+        }
+        catch
+        {
+            // Ignore localized getter failures.
+        }
+
+        try
+        {
+            var text = value.ToString();
+            if (!string.IsNullOrWhiteSpace(text) && !string.Equals(text, type.FullName, StringComparison.Ordinal)
+                && !string.Equals(text, type.Name, StringComparison.Ordinal))
+            {
+                return SanitizeHoverText(text);
+            }
+        }
+        catch
+        {
+            // Ignore ToString failures.
         }
 
         return null;
+    }
+
+    private bool IsShopDescriptionCandidate(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var value = text.Trim();
+        if (LooksLikeValueText(value))
+            return false;
+
+        if (value.IndexOf("price", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        if (value.IndexOf("need", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        if (value.IndexOf("money", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        if (value.IndexOf("required", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+
+        return true;
+    }
+
+    private bool IsLocalizationKey(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var value = text.Trim();
+        if (value.StartsWith("Ntt_", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (value.IndexOf(".item_data.item_description", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        if (value.IndexOf("item_data.item_description", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        return false;
+    }
+
+    private bool IsShopNameCandidate(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var value = text.Trim();
+        if (LooksLikeValueText(value))
+            return false;
+
+        return true;
+    }
+
+    private bool IsShopDescriptionCandidateLoose(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var value = text.Trim();
+        if (LooksLikeValueText(value))
+            return false;
+
+        if (value.IndexOf("price", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        if (value.IndexOf("required", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+
+        if (value.IndexOf("need", StringComparison.OrdinalIgnoreCase) >= 0 && value.Length < 40)
+            return false;
+        if (value.IndexOf("money", StringComparison.OrdinalIgnoreCase) >= 0 && value.Length < 40)
+            return false;
+
+        return true;
+    }
+
+    private string ExtractShopDescriptionFromHoverText(string hoverText, string shopName)
+    {
+        if (string.IsNullOrWhiteSpace(hoverText))
+            return null;
+
+        var cleaned = SanitizeHoverText(hoverText);
+        if (string.IsNullOrWhiteSpace(cleaned))
+            return null;
+
+        var normalized = cleaned.Replace("\r\n", ". ").Replace("\n", ". ").Replace("\r", ". ");
+        var parts = normalized.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var raw in parts)
+        {
+            var sentence = raw?.Trim();
+            if (string.IsNullOrWhiteSpace(sentence))
+                continue;
+
+            if (!string.IsNullOrWhiteSpace(shopName)
+                && string.Equals(sentence, shopName, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!IsShopDescriptionCandidateLoose(sentence))
+                continue;
+
+            return sentence;
+        }
+
+        return null;
+    }
+
+    private int GetShopItemSlot(object shopItem)
+    {
+        if (shopItem == null)
+            return int.MaxValue;
+
+        try
+        {
+            var itemData = GetMemberValue(shopItem, "ItemData") ?? GetMemberValue(shopItem, "itemData");
+            var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
+            var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
+            var source = itemDataObj ?? itemData;
+            var slotValue = GetMemberValue(source, "item_slot_number") ?? GetMemberValue(source, "ItemSlotNumber");
+            if (slotValue is int slot)
+                return slot;
+            if (slotValue is long longSlot)
+                return (int)longSlot;
+        }
+        catch
+        {
+            return int.MaxValue;
+        }
+
+        return int.MaxValue;
+    }
+
+    private bool IsShopItem(object interactable)
+    {
+        return _shopItemType != null && interactable != null && _shopItemType.IsInstanceOfType(interactable);
+    }
+
+    private object ResolveShopItem(object interactable)
+    {
+        if (interactable == null)
+            return null;
+
+        if (IsShopItem(interactable))
+            return interactable;
+
+        if (_shopItemType == null)
+            return null;
+
+        var gameObject = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
+        if (gameObject == null)
+            return null;
+
+        try
+        {
+            var getComponentInParent = gameObject.GetType().GetMethod("GetComponentInParent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            if (getComponentInParent != null)
+            {
+                var parent = getComponentInParent.Invoke(gameObject, new object[] { _shopItemType });
+                if (parent != null)
+                    return parent;
+            }
+
+            var getComponentInChildren = gameObject.GetType().GetMethod("GetComponentInChildren", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            if (getComponentInChildren != null)
+            {
+                var child = getComponentInChildren.Invoke(gameObject, new object[] { _shopItemType });
+                if (child != null)
+                    return child;
+            }
+
+            var getComponent = gameObject.GetType().GetMethod("GetComponent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            return getComponent?.Invoke(gameObject, new object[] { _shopItemType });
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static object GetMemberValue(object instance, string name)
@@ -5112,7 +6625,7 @@ public sealed class UiNavigationHandler
             if (method == null)
                 return null;
 
-            foreach (var textType in new[] { _tmpTextType, _textType })
+            foreach (var textType in GetTextTypes())
             {
                 if (textType == null)
                     continue;
@@ -5211,7 +6724,7 @@ public sealed class UiNavigationHandler
             if (method == null)
                 return null;
 
-            foreach (var textType in new[] { _tmpTextType, _textType })
+            foreach (var textType in GetTextTypes())
             {
                 if (textType == null)
                     continue;
@@ -5267,7 +6780,21 @@ public sealed class UiNavigationHandler
         if (!string.IsNullOrWhiteSpace(tmp))
             return tmp;
 
+        var tmpMesh = GetComponentText(gameObject, _tmpTextMeshType);
+        if (!string.IsNullOrWhiteSpace(tmpMesh))
+            return tmpMesh;
+
         return GetComponentText(gameObject, _textType);
+    }
+
+    private IEnumerable<Type> GetTextTypes()
+    {
+        if (_tmpTextType != null)
+            yield return _tmpTextType;
+        if (_tmpTextMeshType != null)
+            yield return _tmpTextMeshType;
+        if (_textType != null)
+            yield return _textType;
     }
 
     private string GetComponentText(object gameObject, Type textType)
@@ -5521,26 +7048,6 @@ public sealed class UiNavigationHandler
         }
     }
 
-    private static float GetFloatMember(object instance, string name, float fallback)
-    {
-        var value = GetMemberValue(instance, name);
-        return value switch
-        {
-            float f => f,
-            double d => (float)d,
-            int i => i,
-            long l => l,
-            decimal m => (float)m,
-            _ => fallback
-        };
-    }
-
-    private static bool GetBoolMember(object instance, string name, bool fallback)
-    {
-        var value = GetMemberValue(instance, name);
-        return value is bool flag ? flag : fallback;
-    }
-
     private static bool SetFloatMember(object instance, string name, float value)
     {
         if (instance == null || string.IsNullOrWhiteSpace(name))
@@ -5721,15 +7228,6 @@ public sealed class UiNavigationHandler
         Down,
         Left,
         Right
-    }
-
-    private sealed class ReferenceEqualityComparer : IEqualityComparer<object>
-    {
-        public static readonly ReferenceEqualityComparer Instance = new();
-
-        bool IEqualityComparer<object>.Equals(object x, object y) => ReferenceEquals(x, y);
-
-        public int GetHashCode(object obj) => obj == null ? 0 : RuntimeHelpers.GetHashCode(obj);
     }
 
 }
