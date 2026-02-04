@@ -17,6 +17,8 @@ public class SpecificTextAnnouncer
     private ScreenreaderProvider _screenreader;
     private Type _tmpTextType;
     private Type _uiTextType;
+    private Type _inputType;
+    private Type _keyCodeType;
     private Type _unityObjectType;
     private Type _canvasGroupType;
     private Type _selectableType;
@@ -38,6 +40,7 @@ public class SpecificTextAnnouncer
     private string _lastSceneName;
     private string _lastShopHoverText;
     private string _lastMouseHoverText;
+    private readonly Dictionary<string, object> _keyCodes = new(StringComparer.OrdinalIgnoreCase);
 
     public void Initialize(ScreenreaderProvider screenreader)
     {
@@ -106,6 +109,8 @@ public class SpecificTextAnnouncer
     {
         _tmpTextType ??= TypeResolver.Get("TMPro.TMP_Text");
         _uiTextType ??= TypeResolver.Get("UnityEngine.UI.Text");
+        _inputType ??= TypeResolver.Get("UnityEngine.Input");
+        _keyCodeType ??= TypeResolver.Get("UnityEngine.KeyCode");
         _unityObjectType ??= TypeResolver.Get("UnityEngine.Object");
         _canvasGroupType ??= TypeResolver.Get("UnityEngine.CanvasGroup");
         _selectableType ??= TypeResolver.Get("UnityEngine.UI.Selectable");
@@ -142,10 +147,22 @@ public class SpecificTextAnnouncer
         if (IsVoicePlaying(instance))
             return;
 
-        ProcessRoot(instance, IsDialogueFocused, force =>
+        ProcessRoot(instance, IsDialogueFocused, _ =>
         {
-            if (force)
-                AnnounceNonSelectableTextComponents(instance, null, force);
+            var state = _focusByRoot.GetOrCreateValue(instance);
+            var prompt = GetDialoguePromptText(instance);
+
+            if (IsPromptShortcutPressed())
+            {
+                var replay = !string.IsNullOrWhiteSpace(prompt) ? prompt : state.LastDialogPrompt;
+                if (!string.IsNullOrWhiteSpace(replay))
+                {
+                    _screenreader?.SuppressHoverFor(2000);
+                    AnnounceContent(replay, priority: true);
+                }
+            }
+
+            state.LastDialogPrompt = prompt;
         });
     }
 
@@ -1065,6 +1082,108 @@ public class SpecificTextAnnouncer
         return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
     }
 
+    private string GetDialoguePromptText(object dialogue)
+    {
+        if (dialogue == null)
+            return null;
+
+        var textCurrent = GetFieldValue(dialogue, "TextCurrent");
+        var text = GetTextValue(textCurrent);
+        return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    }
+
+    private string GetDialogueOptionsText(object dialogue)
+    {
+        if (dialogue == null)
+            return null;
+
+        var options = new List<string>();
+        var listObj = GetFieldValue(dialogue, "ButtonChoiceList");
+        if (listObj is System.Collections.IEnumerable list)
+        {
+            var index = 1;
+            foreach (var entry in list)
+            {
+                if (entry == null)
+                    continue;
+
+                var textChoice = GetFieldValue(entry, "TextChoice");
+                if (textChoice == null)
+                    continue;
+
+                var text = GetTextValue(textChoice);
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+
+                options.Add(index + ": " + text.Trim());
+                index++;
+            }
+        }
+
+        var continueButton = GetFieldValue(dialogue, "ButtonContinue");
+        if (continueButton != null)
+        {
+            var continueText = GetFieldValue(continueButton, "TextContinue");
+            if (continueText != null && IsVisible(continueText))
+            {
+                var text = GetTextValue(continueText);
+                if (!string.IsNullOrWhiteSpace(text))
+                    options.Add(text.Trim());
+            }
+        }
+
+        return options.Count == 0 ? null : string.Join(". ", options);
+    }
+
+    private bool IsPromptShortcutPressed()
+    {
+        return GetKeyDown("BackQuote") || GetKeyDown("Backquote");
+    }
+
+    private bool GetKeyDown(string key)
+    {
+        if (_inputType == null || _keyCodeType == null || string.IsNullOrWhiteSpace(key))
+            return false;
+
+        var keyCode = GetKeyCode(key);
+        if (keyCode == null)
+            return false;
+
+        try
+        {
+            var method = _inputType.GetMethod("GetKeyDown", BindingFlags.Public | BindingFlags.Static, null, new[] { _keyCodeType }, null);
+            if (method == null)
+                return false;
+
+            var result = method.Invoke(null, new[] { keyCode });
+            return result is bool pressed && pressed;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private object GetKeyCode(string key)
+    {
+        if (_keyCodeType == null || string.IsNullOrWhiteSpace(key))
+            return null;
+
+        if (_keyCodes.TryGetValue(key, out var cached))
+            return cached;
+
+        try
+        {
+            var value = Enum.Parse(_keyCodeType, key, ignoreCase: true);
+            _keyCodes[key] = value;
+            return value;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private string BuildLetterText(object letter)
     {
         if (letter == null)
@@ -1285,6 +1404,9 @@ public class SpecificTextAnnouncer
         if (!ShouldAnnounceForGameObject(current))
             return;
 
+        if (TryAnnounceDialogChoice(current))
+            return;
+
         AnnounceTextComponents(current, null, force: true);
         AnnounceHoveredObjectName(current);
     }
@@ -1331,6 +1453,9 @@ public class SpecificTextAnnouncer
         if (!ShouldAnnounceForGameObject(current))
             return;
 
+        if (TryAnnounceDialogChoice(current))
+            return;
+
         AnnounceTextComponents(current, null, force: true);
     }
 
@@ -1338,6 +1463,10 @@ public class SpecificTextAnnouncer
     {
         var nav = UiNavigationHandler.Instance;
         if (nav == null)
+            return;
+
+        var hovered = GetCurrentHoveredGameObject(GetCurrentEventSystem());
+        if (TryAnnounceDialogChoice(hovered))
             return;
 
         if (nav.TryGetMouseHoverText(out var text))
@@ -1348,6 +1477,43 @@ public class SpecificTextAnnouncer
             _lastMouseHoverText = text;
             AnnounceContent(text, priority: false);
         }
+    }
+
+    private bool TryAnnounceDialogChoice(object gameObject)
+    {
+        if (gameObject == null || _selectableType == null)
+            return false;
+
+        var selectable = GetComponentInParent(gameObject, _selectableType);
+        if (selectable == null)
+            return false;
+
+        var choice = GetComponentInParent(gameObject, "DialogueChoiceButton");
+        if (choice == null)
+            return false;
+
+        var textChoice = GetFieldValue(choice, "TextChoice");
+        if (textChoice == null)
+            return false;
+
+        var text = GetTextValue(textChoice);
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        AnnounceContent(text.Trim(), priority: true);
+        return true;
+    }
+
+    private object GetComponentInParent(object gameObject, string typeName)
+    {
+        if (gameObject == null || string.IsNullOrWhiteSpace(typeName))
+            return null;
+
+        var type = TypeResolver.Get(typeName);
+        if (type == null)
+            return null;
+
+        return GetComponentInParent(gameObject, type);
     }
 
     private object GetCurrentEventSystem()
@@ -2809,6 +2975,7 @@ public class SpecificTextAnnouncer
         public string LastDialogPrompt;
         public string LastDialogOption;
         public string LastLetterText;
+        public string LastDialogOptionsText;
     }
 
     private sealed class CoinState
