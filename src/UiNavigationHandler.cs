@@ -234,6 +234,20 @@ public sealed class UiNavigationHandler
         if (TryAdjustFocusedSlider(direction))
             return;
 
+        if (IsDialogActive() && !IsOfficeActive())
+        {
+            if (direction != NavigationDirection.None)
+            {
+                _pendingEventSystemSyncUntil = Environment.TickCount + 250;
+                TryMoveEventSystemSelection(direction);
+            }
+
+            if (submitInteractPressed)
+                SubmitInteractable();
+
+            return;
+        }
+
         if (IsMenuActive() && !IsOfficeActive() && direction != NavigationDirection.None)
         {
             _pendingEventSystemSyncUntil = Environment.TickCount + 250;
@@ -7229,5 +7243,4 @@ public sealed class UiNavigationHandler
         Left,
         Right
     }
-
 }
