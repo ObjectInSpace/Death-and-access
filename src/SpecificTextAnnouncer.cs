@@ -482,7 +482,22 @@ public class SpecificTextAnnouncer
         if (instance == null)
             return;
 
-        ProcessRoot(instance, IsLetterFocused, force => AnnounceTextComponents(instance, null, force));
+        ProcessRoot(instance, IsLetterFocused, force =>
+        {
+            var letterText = BuildLetterText(instance);
+            if (!string.IsNullOrWhiteSpace(letterText))
+            {
+                var state = _focusByRoot.GetOrCreateValue(instance);
+                if (force || !string.Equals(state.LastLetterText, letterText, StringComparison.Ordinal))
+                {
+                    AnnounceContent(letterText, priority: true);
+                    state.LastLetterText = letterText;
+                }
+                return;
+            }
+
+            AnnounceTextComponents(instance, null, force);
+        });
     }
 
     private void AnnounceConfirmScreens()
@@ -1048,6 +1063,31 @@ public class SpecificTextAnnouncer
 
         var text = GetTextValue(textNews);
         return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    }
+
+    private string BuildLetterText(object letter)
+    {
+        if (letter == null)
+            return null;
+
+        var parts = new List<string>(3);
+        AppendLetterPart(parts, GetFieldValue(letter, "TextLetterTop"));
+        AppendLetterPart(parts, GetFieldValue(letter, "TextLetterBottom"));
+        AppendLetterPart(parts, GetFieldValue(letter, "TextLetterFront"));
+
+        return parts.Count == 0 ? null : string.Join(" ", parts);
+    }
+
+    private void AppendLetterPart(List<string> parts, object component)
+    {
+        if (component == null || !IsVisible(component))
+            return;
+
+        var text = GetTextValue(component);
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        parts.Add(text.Trim());
     }
 
     private static bool IsPlaceholderValue(string value)
@@ -2768,6 +2808,7 @@ public class SpecificTextAnnouncer
         public string LastChaosGlobeScore;
         public string LastDialogPrompt;
         public string LastDialogOption;
+        public string LastLetterText;
     }
 
     private sealed class CoinState
