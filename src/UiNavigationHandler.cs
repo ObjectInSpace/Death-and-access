@@ -1,8 +1,8 @@
 namespace Death_and_Access;
-
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Linq;
 using System.Runtime.CompilerServices;
 
 public sealed class UiNavigationHandler
@@ -14,6 +14,7 @@ public sealed class UiNavigationHandler
     private Type _keyCodeType;
     private Type _textType;
     private Type _tmpTextType;
+    private Type _tmpTextMeshType;
     private Type _interactableType;
     private Type _inputManagerType;
     private Type _hudManagerType;
@@ -30,6 +31,10 @@ public sealed class UiNavigationHandler
     private Type _grimDeskDrawerType;
     private Type _deskItemType;
     private Type _shopItemType;
+    private Type _shopType;
+    private Type _shopManagerType;
+    private Type _elevatorType;
+    private Type _eSceneType;
     private Type _faxMachineType;
     private Type _spinnerType;
     private Type _catToyType;
@@ -87,6 +92,7 @@ public sealed class UiNavigationHandler
     private Type _rectType;
     private Type _renderModeType;
     private Type _cursorType;
+    private Type _articyGlobalVariablesType;
     private MethodInfo _getKeyDownMethod;
     private MethodInfo _getKeyMethod;
     private MethodInfo _getAxisRawMethod;
@@ -160,6 +166,43 @@ public sealed class UiNavigationHandler
         x = _virtualCursorPos.x;
         y = _virtualCursorPos.y;
         return true;
+    }
+
+    internal bool TryGetMouseHoverText(out string text)
+    {
+        text = null;
+        EnsureTypes();
+
+        object interactable = GetInputManagerLastHit();
+        if (interactable == null)
+        {
+            var raw = GetRawMousePosition();
+            if (raw == null)
+                return false;
+
+            interactable = GetInteractableAtScreenPosition(raw.Value.x, raw.Value.y);
+        }
+
+        if (interactable == null && IsShopActive())
+        {
+            var raw = GetRawMousePosition();
+            if (raw != null)
+                interactable = GetShopItemAtScreenPosition(raw.Value.x, raw.Value.y);
+        }
+
+        if (interactable == null)
+            return false;
+
+        var hoverText = GetHoverText(interactable);
+        if (string.IsNullOrWhiteSpace(hoverText))
+        {
+            var shopItem = ResolveShopItem(interactable);
+            if (shopItem != null)
+                hoverText = GetHoverText(shopItem);
+        }
+
+        text = BuildHoverText(interactable, hoverText);
+        return !string.IsNullOrWhiteSpace(text);
     }
 
     public void Update()
@@ -586,6 +629,12 @@ public sealed class UiNavigationHandler
                 return true;
         }
 
+        if (IsShopSceneActive())
+        {
+            if (TryHandleShopNumberShortcut())
+                return true;
+        }
+
         if (GetKeyDown("M"))
             return AnnounceMoney();
 
@@ -621,6 +670,45 @@ public sealed class UiNavigationHandler
 
         var button = GetElevatorButtonByIndex(index);
         return ActivateInteractableWithFocus(button);
+    }
+
+    private bool TryHandleShopNumberShortcut()
+    {
+        if (!IsShopSceneActive())
+            return false;
+
+        var digit = GetNumberRowDigit();
+        if (digit < 1 || digit > 4)
+            return false;
+
+        if (digit == 4)
+        {
+            var back = FindElevatorButtonInScene("Elevator")
+                       ?? FindInteractableByHoverTextContains("elevator")
+                       ?? FindInteractableByHoverTextContains("back")
+                       ?? FindInteractableByNameContains("elevator")
+                       ?? FindInteractableByNameContains("ButtonElevator");
+            if (back == null)
+                back = GetElevatorButtonForScene("Elevator");
+            var result = ActivateInteractableWithFocus(back);
+            var interactResult = TryInvokeInteract(back);
+            if (!interactResult)
+                TryInvokeUiClick(back);
+            return result || interactResult;
+        }
+
+        var items = GetShopItemsOrdered();
+        var index = digit - 1;
+        if (index < 0 || index >= items.Count)
+            return false;
+
+        var target = items[index];
+        var ok = ActivateInteractableWithFocus(target);
+        if (TryInvokeInteract(target))
+            ok = true;
+        else
+            TryInvokeUiClick(target);
+        return ok;
     }
 
     private object GetElevatorButtonByIndex(int index)
@@ -764,6 +852,134 @@ public sealed class UiNavigationHandler
         return -1;
     }
 
+    private int GetNumberRowDigit()
+    {
+        for (var i = 1; i <= 4; i++)
+        {
+            if (GetKeyDown("Alpha" + i))
+                return i;
+        }
+
+        return -1;
+    }
+
+    private List<object> GetShopItemsOrdered()
+    {
+        var items = new List<object>();
+        if (_shopItemType == null)
+            return items;
+
+        try
+        {
+            if (_shopManagerType != null)
+            {
+                var manager = GetStaticInstance(_shopManagerType);
+                if (manager != null)
+                {
+                    var field = _shopManagerType.GetField("SpawnedItems", BindingFlags.Instance | BindingFlags.NonPublic);
+                    var list = field?.GetValue(manager) as System.Collections.IEnumerable;
+                    if (list != null)
+                    {
+                        foreach (var item in list)
+                        {
+                            if (item == null)
+                                continue;
+                            if (!IsInAllowedScene(item))
+                                continue;
+                            var go = GetGameObjectFromComponent(item) ?? GetMemberValue(item, "gameObject");
+                            if (go != null && !IsGameObjectActive(go))
+                                continue;
+                            items.Add(item);
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore and fall back.
+        }
+
+        if (items.Count == 0 && _shopType != null)
+        {
+            try
+            {
+                var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+                var instance = instanceField?.GetValue(null);
+                var shelf = instance != null ? GetMemberValue(instance, "Shelf") : null;
+                if (shelf != null)
+                {
+                    var method = shelf.GetType().GetMethod(
+                        "GetComponentsInChildren",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null,
+                        new[] { typeof(Type), typeof(bool) },
+                        null);
+
+                    var results = method?.Invoke(shelf, new object[] { _shopItemType, true }) as Array;
+                    if (results != null)
+                    {
+                        foreach (var item in results)
+                        {
+                            if (item == null)
+                                continue;
+                            if (!IsInAllowedScene(item))
+                                continue;
+                            var go = GetGameObjectFromComponent(item) ?? GetMemberValue(item, "gameObject");
+                            if (go != null && !IsGameObjectActive(go))
+                                continue;
+                            items.Add(item);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore and fall back.
+            }
+        }
+
+        if (items.Count == 0)
+        {
+            foreach (var item in FindSceneObjectsOfType(_shopItemType))
+            {
+                if (item == null)
+                    continue;
+
+                if (!IsInAllowedScene(item))
+                    continue;
+
+                var go = GetGameObjectFromComponent(item) ?? GetMemberValue(item, "gameObject");
+                if (go != null && !IsGameObjectActive(go))
+                    continue;
+
+                items.Add(item);
+            }
+        }
+
+        items.Sort((left, right) =>
+        {
+            var leftSlot = GetShopItemSlot(left);
+            var rightSlot = GetShopItemSlot(right);
+            var cmpSlot = leftSlot.CompareTo(rightSlot);
+            if (cmpSlot != 0)
+                return cmpSlot;
+
+            var leftPos = GetTransformPosition3(GetGameObjectFromComponent(left) ?? GetMemberValue(left, "gameObject"));
+            var rightPos = GetTransformPosition3(GetGameObjectFromComponent(right) ?? GetMemberValue(right, "gameObject"));
+            var leftX = leftPos?.x ?? 0f;
+            var rightX = rightPos?.x ?? 0f;
+            var cmp = leftX.CompareTo(rightX);
+            if (cmp != 0)
+                return cmp;
+            var leftY = leftPos?.y ?? 0f;
+            var rightY = rightPos?.y ?? 0f;
+            return rightY.CompareTo(leftY);
+        });
+
+        return items;
+    }
+
     private object GetDialogSelectableByIndex(int index)
     {
         if (index < 0)
@@ -864,6 +1080,13 @@ public sealed class UiNavigationHandler
         if (_hudManagerType == null)
             return false;
 
+        var moneyValue = GetCurrentMoneyValue();
+        if (!string.IsNullOrWhiteSpace(moneyValue))
+        {
+            _screenreader?.Announce(moneyValue);
+            return true;
+        }
+
         var instance = GetStaticInstance(_hudManagerType);
         if (instance == null)
             return false;
@@ -876,8 +1099,52 @@ public sealed class UiNavigationHandler
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
-        _screenreader?.Announce(text.Trim());
+        text = TextSanitizer.StripRichTextTags(text);
+        var cleaned = ExtractMoneyValue(text);
+        _screenreader?.Announce(string.IsNullOrWhiteSpace(cleaned) ? text.Trim() : cleaned);
         return true;
+    }
+
+    private string GetCurrentMoneyValue()
+    {
+        if (_articyGlobalVariablesType == null)
+            return null;
+
+        try
+        {
+            var defaultProp = _articyGlobalVariablesType.GetProperty("Default", BindingFlags.Public | BindingFlags.Static);
+            var defaults = defaultProp?.GetValue(null);
+            if (defaults == null)
+                return null;
+
+            var inventory = GetMemberValue(defaults, "inventory");
+            if (inventory == null)
+                return null;
+
+            var money = GetMemberValue(inventory, "money");
+            if (money == null)
+                return null;
+
+            return money.ToString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string ExtractMoneyValue(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        var normalized = text.Replace("\r", "").Replace("\n", " ").Trim();
+        var eq = normalized.LastIndexOf('=');
+        if (eq >= 0 && eq + 1 < normalized.Length)
+            return normalized.Substring(eq + 1).Trim();
+
+        var digits = new string(normalized.Where(char.IsDigit).ToArray());
+        return string.IsNullOrWhiteSpace(digits) ? null : digits;
     }
 
 
@@ -1300,9 +1567,24 @@ public sealed class UiNavigationHandler
         if (interactable == null)
             return false;
 
-        if (IsShopItem(interactable) && !IsShopItemOwned(interactable))
+        if (IsShopItem(interactable) && !IsShopItemOwned(interactable) && !IsShopSceneActive())
             return false;
 
+        return true;
+    }
+
+    private bool ActivateOrInteractFallback(object interactable)
+    {
+        if (interactable == null)
+            return false;
+
+        if (ActivateInteractableWithFocus(interactable))
+            return true;
+
+        if (TryInvokeInteract(interactable))
+            return true;
+
+        TryInvokeUiClick(interactable);
         return true;
     }
 
@@ -1375,6 +1657,128 @@ public sealed class UiNavigationHandler
         {
             return false;
         }
+    }
+
+    private bool IsShopSceneActive()
+    {
+        if (_elevatorManagerType == null)
+            return false;
+
+        var instance = GetStaticInstance(_elevatorManagerType);
+        if (instance == null)
+            return false;
+
+        try
+        {
+            var method = _elevatorManagerType.GetMethod("GetCurrentScene", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            var scene = method.Invoke(instance, null);
+            return scene != null && string.Equals(scene.ToString(), "Shop", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private object GetElevatorButtonForScene(string sceneName)
+    {
+        if (_elevatorType == null || _eSceneType == null || string.IsNullOrWhiteSpace(sceneName))
+            return null;
+
+        try
+        {
+            var instanceField = _elevatorType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            object sceneValue;
+            try
+            {
+                sceneValue = Enum.Parse(_eSceneType, sceneName);
+            }
+            catch
+            {
+                return null;
+            }
+
+            var method = _elevatorType.GetMethod("GetElevatorButtonBySceneType", BindingFlags.Instance | BindingFlags.Public);
+            return method?.Invoke(instance, new[] { sceneValue });
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private object FindElevatorButtonInScene(string sceneName)
+    {
+        if (_elevatorButtonType == null || _eSceneType == null || string.IsNullOrWhiteSpace(sceneName))
+            return null;
+
+        object sceneValue;
+        try
+        {
+            sceneValue = Enum.Parse(_eSceneType, sceneName);
+        }
+        catch
+        {
+            return null;
+        }
+
+        foreach (var button in FindSceneObjectsOfType(_elevatorButtonType))
+        {
+            if (button == null)
+                continue;
+
+            if (!IsInAllowedScene(button))
+                continue;
+
+            var go = GetInteractableGameObject(button) ?? GetMemberValue(button, "gameObject");
+            if (go != null && !IsGameObjectActive(go))
+                continue;
+
+            var dest = GetMemberValue(button, "DestinationScene");
+            if (dest != null && dest.Equals(sceneValue))
+                return button;
+        }
+
+        return null;
+    }
+
+    private string GetInteractableEnabledState(object interactable)
+    {
+        if (interactable == null)
+            return "null";
+
+        try
+        {
+            var type = interactable.GetType();
+            var enabledField = type.GetField("bIsEnabled", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (enabledField != null && enabledField.GetValue(interactable) is bool enabled)
+                return enabled ? "true" : "false";
+
+            var enabledProp = type.GetProperty("enabled", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (enabledProp != null && enabledProp.GetValue(interactable) is bool enabledPropValue)
+                return enabledPropValue ? "true" : "false";
+
+            var go = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
+            if (go != null)
+            {
+                var goType = go.GetType();
+                if (ReflectionUtils.TryGetBoolProperty(goType, go, "activeInHierarchy", out var active))
+                    return active ? "active" : "inactive";
+            }
+        }
+        catch
+        {
+            return "error";
+        }
+
+        return "unknown";
     }
 
     private bool IsDialogActive()
@@ -1506,6 +1910,7 @@ public sealed class UiNavigationHandler
         _keyCodeType ??= TypeResolver.Get("UnityEngine.KeyCode");
         _textType ??= TypeResolver.Get("UnityEngine.UI.Text");
         _tmpTextType ??= TypeResolver.Get("TMPro.TextMeshProUGUI");
+        _tmpTextMeshType ??= TypeResolver.Get("TMPro.TextMeshPro");
         _interactableType ??= TypeResolver.Get("Interactable");
         _inputManagerType ??= TypeResolver.Get("InputManager");
         _hudManagerType ??= TypeResolver.Get("HUDManager");
@@ -1522,6 +1927,10 @@ public sealed class UiNavigationHandler
         _grimDeskDrawerType ??= TypeResolver.Get("GrimDeskDrawer");
         _deskItemType ??= TypeResolver.Get("DeskItem");
         _shopItemType ??= TypeResolver.Get("ShopItem");
+        _shopType ??= TypeResolver.Get("Shop");
+        _shopManagerType ??= TypeResolver.Get("ShopManager");
+        _elevatorType ??= TypeResolver.Get("Elevator");
+        _eSceneType ??= TypeResolver.Get("EScene");
         _faxMachineType ??= TypeResolver.Get("FaxMachine");
         _spinnerType ??= TypeResolver.Get("Spinner");
         _catToyType ??= TypeResolver.Get("CatToy");
@@ -1564,6 +1973,7 @@ public sealed class UiNavigationHandler
         _skipIntroType ??= TypeResolver.Get("SkipIntro");
         _galleryScreenType ??= TypeResolver.Get("GalleryScreen");
         _demoEndScreenType ??= TypeResolver.Get("DemoEndScreen");
+        _articyGlobalVariablesType ??= TypeResolver.Get("Articy.Project_Of_Death.GlobalVariables.ArticyGlobalVariables");
         _comicManagerType ??= TypeResolver.Get("ComicManager");
         _unityObjectType ??= TypeResolver.Get("UnityEngine.Object");
         _gameObjectType ??= TypeResolver.Get("UnityEngine.GameObject");
@@ -1795,6 +2205,12 @@ public sealed class UiNavigationHandler
 
         var uiHit = GetUiRaycastGameObject();
         var hit = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
+        if (hit == null && IsShopActive())
+        {
+            var shopHit = GetShopItemAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
+            if (shopHit != null)
+                hit = shopHit;
+        }
         if (hit == null)
         {
             if (uiHit != null)
@@ -1884,28 +2300,24 @@ public sealed class UiNavigationHandler
 
     private void SyncVirtualCursorToRawMouse()
     {
+        if (_virtualCursorActive)
+        {
+            var mouseDx = GetAxisRawAny("Mouse X", "MouseX");
+            var mouseDy = GetAxisRawAny("Mouse Y", "MouseY");
+            if (Math.Abs(mouseDx) > 0.01f || Math.Abs(mouseDy) > 0.01f)
+            {
+                _virtualCursorActive = false;
+                SetVirtualCursorOverlayVisible(false);
+            }
+
+            return;
+        }
+
         var raw = GetRawMousePosition();
         if (raw == null)
             return;
 
-        if (_lastRawMousePos == null)
-        {
-            _lastRawMousePos = raw;
-            return;
-        }
-
-        var dx = Math.Abs(raw.Value.x - _lastRawMousePos.Value.x);
-        var dy = Math.Abs(raw.Value.y - _lastRawMousePos.Value.y);
         _lastRawMousePos = raw;
-
-        if (dx <= 0.5f && dy <= 0.5f)
-            return;
-
-        if (_virtualCursorActive)
-        {
-            _virtualCursorActive = false;
-            SetVirtualCursorOverlayVisible(false);
-        }
     }
 
     private void MoveVirtualCursor(float dx, float dy)
@@ -3440,7 +3852,7 @@ public sealed class UiNavigationHandler
         if (_cameraType == null || _physics2DType == null || _vector3Type == null || _interactableType == null || _collider2DType == null)
             return null;
 
-        var camera = GetMainCamera();
+        var camera = GetMainCamera() ?? GetAnyCamera();
         if (camera == null)
             return null;
 
@@ -3517,6 +3929,57 @@ public sealed class UiNavigationHandler
             var resolvedOverlap = ResolveInteractableForFocus(overlapInteractable);
             resolvedOverlap = FilterDialogInteractable(resolvedOverlap);
             return IsInAllowedScene(resolvedOverlap) ? resolvedOverlap : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private object GetShopItemAtScreenPosition(float x, float y)
+    {
+        if (_cameraType == null || _physics2DType == null || _vector3Type == null || _vector2Type == null || _shopItemType == null || _collider2DType == null)
+            return null;
+
+        var camera = GetMainCamera() ?? GetAnyCamera();
+        if (camera == null)
+            return null;
+
+        try
+        {
+            var screenVector = Activator.CreateInstance(_vector3Type, x, y, 0f);
+            var screenToWorld = _cameraType.GetMethod("ScreenToWorldPoint", BindingFlags.Instance | BindingFlags.Public, null, new[] { _vector3Type }, null);
+            if (screenToWorld == null)
+                return null;
+
+            var world = screenToWorld.Invoke(camera, new[] { screenVector });
+            if (world == null)
+                return null;
+
+            var world2 = GetVector2FromValue(world);
+            if (world2 == null)
+                return null;
+
+            var point = Activator.CreateInstance(_vector2Type, world2.Value.x, world2.Value.y);
+            var overlapPoint = _physics2DType.GetMethod("OverlapPoint", BindingFlags.Public | BindingFlags.Static, null, new[] { _vector2Type }, null);
+            if (overlapPoint == null)
+                return null;
+
+            var overlap = overlapPoint.Invoke(null, new[] { point });
+            if (overlap == null)
+                return null;
+
+            var overlapGameObjectProp = overlap.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
+            var overlapGameObject = overlapGameObjectProp?.GetValue(overlap);
+            if (overlapGameObject == null)
+                return null;
+
+            var getComponentInParent = overlapGameObject.GetType().GetMethod("GetComponentInParent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
+            if (getComponentInParent == null)
+                return null;
+
+            var shopItem = getComponentInParent.Invoke(overlapGameObject, new object[] { _shopItemType });
+            return IsInAllowedScene(shopItem) ? shopItem : null;
         }
         catch
         {
@@ -5313,12 +5776,86 @@ public sealed class UiNavigationHandler
         if (_screenreader == null)
             return;
 
+        var built = BuildHoverText(interactable, hoverText);
+        if (string.IsNullOrWhiteSpace(built))
+            return;
+
+        if (IsDialogActive())
+            return;
+
+        if (_screenreader.ShouldSuppressHover() || _screenreader.IsBusy)
+            return;
+
+        _screenreader.Announce(built);
+        return;
+    }
+
+    private string BuildHoverText(object interactable, string hoverText)
+    {
+        if (!string.IsNullOrWhiteSpace(hoverText) && IsMoneyNotificationText(hoverText))
+            return null;
+
+        hoverText = StripLeadingMoneySentence(hoverText);
+
         var shopItem = ResolveShopItem(interactable) ?? interactable;
+        if (IsShopActive())
+        {
+            var shopHover = GetHudHoverShopText();
+            if (string.IsNullOrWhiteSpace(shopHover))
+                shopHover = hoverText;
+
+            shopHover = SanitizeHoverText(shopHover);
+            shopHover = StripLeadingMoneySentence(shopHover);
+            if (!string.IsNullOrWhiteSpace(shopHover) && !LooksLikeValueText(shopHover))
+            {
+                var nameText = GetShopUiNameText();
+                var priceText = GetShopUiPriceText();
+                var parts = new List<string>();
+                if (!string.IsNullOrWhiteSpace(nameText))
+                    parts.Add(SanitizeHoverText(nameText));
+                parts.Add(shopHover);
+                if (!string.IsNullOrWhiteSpace(priceText))
+                    parts.Add("Price " + priceText);
+                return string.Join(". ", parts);
+            }
+        }
+        else
+        {
+            var hudHover = GetHudHoverText();
+            hudHover = SanitizeHoverText(hudHover);
+            hudHover = StripLeadingMoneySentence(hudHover);
+            if (!string.IsNullOrWhiteSpace(hudHover) && !LooksLikeValueText(hudHover))
+                return hudHover;
+        }
+
         var shopDescription = GetShopItemDescription(shopItem);
         var shopName = GetShopItemName(shopItem);
         var name = SanitizeHoverText(GetGameObjectName(interactable));
         hoverText = SanitizeHoverText(hoverText);
         shopDescription = SanitizeHoverText(shopDescription);
+        if (string.IsNullOrWhiteSpace(shopName))
+            shopName = GetFriendlyInteractableName(interactable);
+        if (string.IsNullOrWhiteSpace(shopName) && shopItem != null)
+            shopName = GetShopDisplayNameFromInstance();
+        if (string.IsNullOrWhiteSpace(shopName) && IsShopActive())
+            shopName = GetShopUiNameText();
+
+        if (IsShopActive())
+        {
+            var hudShop = GetHudHoverShopText();
+            if (!string.IsNullOrWhiteSpace(hudShop) && IsShopDescriptionCandidate(hudShop))
+            {
+                if (string.IsNullOrWhiteSpace(shopDescription) || IsLocalizationKey(shopDescription))
+                    shopDescription = hudShop;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(shopDescription) && !string.IsNullOrWhiteSpace(hoverText))
+        {
+            var extracted = ExtractShopDescriptionFromHoverText(hoverText, shopName);
+            if (!string.IsNullOrWhiteSpace(extracted))
+                shopDescription = extracted;
+        }
 
         if (!string.IsNullOrWhiteSpace(shopDescription))
         {
@@ -5358,59 +5895,95 @@ public sealed class UiNavigationHandler
         if (string.IsNullOrWhiteSpace(hoverText))
             hoverText = GetFriendlyInteractableName(interactable) ?? name;
 
+        if (IsShopActive() && !string.IsNullOrWhiteSpace(hoverText) && LooksLikeValueText(hoverText))
+        {
+            if (!string.IsNullOrWhiteSpace(shopName) || !string.IsNullOrWhiteSpace(shopDescription))
+                hoverText = $"{shopName ?? shopDescription}";
+            else
+                hoverText = null;
+        }
+
         if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(hoverText)
             && hoverText.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0)
         {
             hoverText = $"{name}. {hoverText}";
         }
 
-        if (string.IsNullOrWhiteSpace(hoverText))
-            return;
+        hoverText = StripLeadingMoneySentence(hoverText);
 
-        if (IsDialogActive())
-            return;
-
-        if (_screenreader.ShouldSuppressHover() || _screenreader.IsBusy)
-            return;
-
-        _screenreader.Announce(hoverText);
-
-        if (shopItem != null)
-            LogShopItemDebug(shopItem, hoverText);
+        return hoverText;
     }
 
-    private int _nextShopLogTick;
-
-    private void LogShopItemDebug(object shopItem, string hoverText)
+    private string StripLeadingMoneySentence(string text)
     {
-        if (shopItem == null)
-            return;
+        if (string.IsNullOrWhiteSpace(text))
+            return text;
 
-        var now = Environment.TickCount;
-        if (now < _nextShopLogTick)
-            return;
+        var trimmed = text.Trim();
+        var sign = trimmed[0] == '+' || trimmed[0] == '-' ? 1 : 0;
+        var idx = sign;
+        while (idx < trimmed.Length && char.IsDigit(trimmed[idx]))
+            idx++;
 
-        _nextShopLogTick = now + 1500;
+        if (idx == sign)
+            return text;
+
+        while (idx < trimmed.Length && char.IsWhiteSpace(trimmed[idx]))
+            idx++;
+
+        if (idx < trimmed.Length && trimmed[idx] == '.')
+        {
+            var remainder = trimmed.Substring(idx + 1).TrimStart();
+            return string.IsNullOrWhiteSpace(remainder) ? null : remainder;
+        }
+
+        return text;
+    }
+
+    private bool IsMoneyNotificationText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var trimmed = text.Trim();
+        if (trimmed.StartsWith("+", StringComparison.Ordinal) || trimmed.StartsWith("-", StringComparison.Ordinal))
+            trimmed = trimmed.Substring(1).TrimStart();
+
+        if (trimmed.Length == 0)
+            return false;
+
+        foreach (var ch in trimmed)
+        {
+            if (!char.IsDigit(ch))
+                return false;
+        }
+
+        return true;
+    }
+
+    private string GetHudHoverText()
+    {
+        if (_hudManagerType == null)
+            return null;
 
         try
         {
-            var itemData = GetMemberValue(shopItem, "ItemData") ?? GetMemberValue(shopItem, "itemData");
-            var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
-            var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
-            var source = itemDataObj ?? itemData;
+            var instanceField = _hudManagerType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
 
-            var desc = GetShopItemDescription(shopItem);
-            var name = GetShopItemName(shopItem);
-            var price = GetShopItemPriceText(shopItem);
-
-            MelonLoader.MelonLogger.Msg(
-                $"Shop debug: name='{name ?? ""}', desc='{desc ?? ""}', price='{price ?? ""}', hover='{hoverText ?? ""}', dataType='{source?.GetType().Name ?? "null"}', templateType='{template?.GetType().Name ?? "null"}'");
+            var textHoverField = _hudManagerType.GetField("TextHover", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textHover = textHoverField?.GetValue(instance);
+            var raw = ReadStringValue(GetMemberValue(textHover, "text"));
+            return SanitizeHoverText(raw);
         }
         catch
         {
-            // Ignore.
+            return null;
         }
     }
+
 
     private string GetCalendarDayText(object interactable)
     {
@@ -5471,28 +6044,45 @@ public sealed class UiNavigationHandler
         if (!IsShopItem(interactable))
             return null;
 
-        var itemData = GetMemberValue(interactable, "ItemData");
-        if (itemData == null)
-            return null;
+        var itemData = GetMemberValue(interactable, "ItemData") ?? GetMemberValue(interactable, "itemData");
+        var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
+        var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
+        var source = itemDataObj ?? itemData;
 
-        var template = GetMemberValue(itemData, "Template");
-        if (template == null)
-            return null;
+        if (source != null)
+        {
+            foreach (var field in new[]
+                     {
+                         "item_name", "itemName", "ItemName",
+                         "Unresolved_item_name", "LocaKey_item_name",
+                         "name", "Name",
+                         "display_name", "displayName", "DisplayName",
+                         "item_title", "itemTitle", "ItemTitle",
+                         "title", "Title",
+                         "item_name_key", "itemNameKey", "name_key", "nameKey", "NameKey"
+                     })
+            {
+                var value = ReadStringValue(GetMemberValue(source, field));
+                if (!string.IsNullOrWhiteSpace(value) && IsShopNameCandidate(value))
+                    return value;
+            }
+        }
 
-        var itemDataObj = GetMemberValue(template, "item_data");
-        if (itemDataObj == null)
-            return null;
+        var uiName = GetShopUiNameText();
+        if (!string.IsNullOrWhiteSpace(uiName) && IsShopNameCandidate(uiName))
+            return uiName;
 
-        var itemName = GetMemberValue(itemDataObj, "item_name") as string;
-        return SanitizeHoverText(itemName);
-    }
+        var gameObject = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
+        var text = FindFirstUsefulTextInChildren(gameObject);
+        if (string.IsNullOrWhiteSpace(text))
+            text = FindNearestText(gameObject);
+        if (string.IsNullOrWhiteSpace(text))
+            text = FindSiblingLabelText(gameObject);
+        text = SanitizeHoverText(text);
+        if (!string.IsNullOrWhiteSpace(text) && IsShopNameCandidate(text))
+            return text;
 
-    private bool IsShopItem(object interactable)
-    {
-        if (interactable == null)
-            return false;
-
-        return string.Equals(interactable.GetType().Name, "ShopItem", StringComparison.Ordinal);
+        return null;
     }
 
     private bool IsShopItemOwned(object interactable)
@@ -5537,7 +6127,7 @@ public sealed class UiNavigationHandler
         {
             var method = interactable.GetType().GetMethod("GetPrice", BindingFlags.Instance | BindingFlags.Public);
             if (method == null)
-                return null;
+                throw new MissingMethodException();
 
             var result = method.Invoke(interactable, null);
             if (result is int price)
@@ -5549,8 +6139,40 @@ public sealed class UiNavigationHandler
         }
         catch
         {
-            return null;
+            // Fall back to known price fields.
         }
+
+        var itemData = GetMemberValue(interactable, "ItemData") ?? GetMemberValue(interactable, "itemData");
+        var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
+        var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
+        var source = itemDataObj ?? itemData ?? interactable;
+
+        foreach (var field in new[]
+                 {
+                     "price", "Price", "item_price", "itemPrice", "ItemPrice",
+                     "cost", "Cost", "item_cost", "itemCost", "ItemCost"
+                 })
+        {
+            var value = GetMemberValue(source, field);
+            if (value is int price)
+                return "Price " + price;
+            if (value is long longPrice)
+                return "Price " + longPrice;
+            if (value is float f)
+                return "Price " + Math.Round(f);
+            if (value is double d)
+                return "Price " + Math.Round(d);
+            if (value is decimal dec)
+                return "Price " + Math.Round(dec);
+
+            var text = ReadStringValue(value);
+            if (!string.IsNullOrWhiteSpace(text) && double.TryParse(text, out var parsed))
+                return "Price " + Math.Round(parsed);
+        }
+
+        var uiPrice = GetShopUiPriceText();
+        if (!string.IsNullOrWhiteSpace(uiPrice))
+            return "Price " + uiPrice;
 
         return null;
     }
@@ -5567,19 +6189,209 @@ public sealed class UiNavigationHandler
 
         if (source != null)
         {
-            foreach (var field in new[] { "item_description", "item_desc", "description", "desc", "itemDescription", "itemDesc" })
+            foreach (var field in new[]
+                     {
+                         "item_description", "item_desc", "description", "desc", "itemDescription", "itemDesc",
+                         "Unresolved_item_description", "LocaKey_item_description",
+                         "item_description_key", "itemDescKey", "item_desc_key", "description_key", "desc_key"
+                     })
             {
-                var value = GetMemberValue(source, field) as string;
-                value = SanitizeHoverText(value);
-                if (!string.IsNullOrWhiteSpace(value) && IsShopDescriptionCandidate(value))
+                var value = ReadStringValue(GetMemberValue(source, field));
+                if (!string.IsNullOrWhiteSpace(value) && IsShopDescriptionCandidate(value) && !IsLocalizationKey(value))
+                    return value;
+            }
+
+            foreach (var field in new[]
+                     {
+                         "item_flavour_text_first", "item_flavour_text_second", "item_flavour_text_third",
+                         "Unresolved_item_flavour_text_first", "Unresolved_item_flavour_text_second", "Unresolved_item_flavour_text_third",
+                         "LocaKey_item_flavour_text_first", "LocaKey_item_flavour_text_second", "LocaKey_item_flavour_text_third"
+                     })
+            {
+                var value = ReadStringValue(GetMemberValue(source, field));
+                if (!string.IsNullOrWhiteSpace(value) && IsShopDescriptionCandidate(value) && !IsLocalizationKey(value))
                     return value;
             }
         }
 
         var gameObject = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
         var text = FindFirstUsefulTextInChildren(gameObject);
+        if (string.IsNullOrWhiteSpace(text))
+            text = FindNearestText(gameObject);
+        if (string.IsNullOrWhiteSpace(text))
+            text = FindSiblingLabelText(gameObject);
         if (!string.IsNullOrWhiteSpace(text) && IsShopDescriptionCandidate(text))
             return text;
+
+        return null;
+    }
+
+    private string GetShopDisplayNameFromInstance()
+    {
+        if (_shopType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textNameField = _shopType.GetField("TextName", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textName = textNameField?.GetValue(instance);
+            var text = ReadStringValue(GetMemberValue(textName, "text"));
+            return SanitizeHoverText(text);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string GetShopUiNameText()
+    {
+        if (_shopType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textNameField = _shopType.GetField("TextName", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textName = textNameField?.GetValue(instance);
+            return SanitizeHoverText(ReadStringValue(GetMemberValue(textName, "text")));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string GetShopUiPriceText()
+    {
+        if (_shopType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textPriceField = _shopType.GetField("TextPrice", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textPrice = textPriceField?.GetValue(instance);
+            var raw = SanitizeHoverText(ReadStringValue(GetMemberValue(textPrice, "text")));
+            if (string.IsNullOrWhiteSpace(raw))
+                return null;
+
+            var digits = new string(raw.Where(char.IsDigit).ToArray());
+            return string.IsNullOrWhiteSpace(digits) ? raw.Trim() : digits;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string GetHudHoverShopText()
+    {
+        if (_hudManagerType == null)
+            return null;
+
+        try
+        {
+            var instanceField = _hudManagerType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return null;
+
+            var textHoverShopField = _hudManagerType.GetField("TextHoverShop", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var textHoverShop = textHoverShopField?.GetValue(instance);
+            var raw = ReadStringValue(GetMemberValue(textHoverShop, "text"));
+            return SanitizeHoverText(raw);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private bool IsShopActive()
+    {
+        if (_shopType == null)
+            return false;
+
+        try
+        {
+            var instanceField = _shopType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
+            var instance = instanceField?.GetValue(null);
+            if (instance == null)
+                return false;
+
+            var go = GetMemberValue(instance, "gameObject");
+            return go != null && IsGameObjectActive(go);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private string ReadStringValue(object value)
+    {
+        if (value == null)
+            return null;
+
+        if (value is string raw)
+            return SanitizeHoverText(raw);
+
+        var type = value.GetType();
+        foreach (var name in new[]
+                 {
+                     "Value", "value", "Text", "text", "String", "string",
+                     "LocalizedString", "localizedString",
+                     "Key", "key", "m_key",
+                     "Term", "term", "mTerm", "m_term"
+                 })
+        {
+            var memberValue = GetMemberValue(value, name);
+            if (memberValue is string memberText)
+                return SanitizeHoverText(memberText);
+        }
+
+        try
+        {
+            var method = type.GetMethod("GetLocalizedString", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (method != null)
+            {
+                var result = method.Invoke(value, null) as string;
+                if (!string.IsNullOrWhiteSpace(result))
+                    return SanitizeHoverText(result);
+            }
+        }
+        catch
+        {
+            // Ignore localized getter failures.
+        }
+
+        try
+        {
+            var text = value.ToString();
+            if (!string.IsNullOrWhiteSpace(text) && !string.Equals(text, type.FullName, StringComparison.Ordinal)
+                && !string.Equals(text, type.Name, StringComparison.Ordinal))
+            {
+                return SanitizeHoverText(text);
+            }
+        }
+        catch
+        {
+            // Ignore ToString failures.
+        }
 
         return null;
     }
@@ -5603,6 +6415,113 @@ public sealed class UiNavigationHandler
             return false;
 
         return true;
+    }
+
+    private bool IsLocalizationKey(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var value = text.Trim();
+        if (value.StartsWith("Ntt_", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (value.IndexOf(".item_data.item_description", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        if (value.IndexOf("item_data.item_description", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        return false;
+    }
+
+    private bool IsShopNameCandidate(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var value = text.Trim();
+        if (LooksLikeValueText(value))
+            return false;
+
+        return true;
+    }
+
+    private bool IsShopDescriptionCandidateLoose(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var value = text.Trim();
+        if (LooksLikeValueText(value))
+            return false;
+
+        if (value.IndexOf("price", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        if (value.IndexOf("required", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+
+        if (value.IndexOf("need", StringComparison.OrdinalIgnoreCase) >= 0 && value.Length < 40)
+            return false;
+        if (value.IndexOf("money", StringComparison.OrdinalIgnoreCase) >= 0 && value.Length < 40)
+            return false;
+
+        return true;
+    }
+
+    private string ExtractShopDescriptionFromHoverText(string hoverText, string shopName)
+    {
+        if (string.IsNullOrWhiteSpace(hoverText))
+            return null;
+
+        var cleaned = SanitizeHoverText(hoverText);
+        if (string.IsNullOrWhiteSpace(cleaned))
+            return null;
+
+        var normalized = cleaned.Replace("\r\n", ". ").Replace("\n", ". ").Replace("\r", ". ");
+        var parts = normalized.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var raw in parts)
+        {
+            var sentence = raw?.Trim();
+            if (string.IsNullOrWhiteSpace(sentence))
+                continue;
+
+            if (!string.IsNullOrWhiteSpace(shopName)
+                && string.Equals(sentence, shopName, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!IsShopDescriptionCandidateLoose(sentence))
+                continue;
+
+            return sentence;
+        }
+
+        return null;
+    }
+
+    private int GetShopItemSlot(object shopItem)
+    {
+        if (shopItem == null)
+            return int.MaxValue;
+
+        try
+        {
+            var itemData = GetMemberValue(shopItem, "ItemData") ?? GetMemberValue(shopItem, "itemData");
+            var template = itemData != null ? GetMemberValue(itemData, "Template") ?? GetMemberValue(itemData, "template") : null;
+            var itemDataObj = template != null ? GetMemberValue(template, "item_data") ?? GetMemberValue(template, "ItemData") : null;
+            var source = itemDataObj ?? itemData;
+            var slotValue = GetMemberValue(source, "item_slot_number") ?? GetMemberValue(source, "ItemSlotNumber");
+            if (slotValue is int slot)
+                return slot;
+            if (slotValue is long longSlot)
+                return (int)longSlot;
+        }
+        catch
+        {
+            return int.MaxValue;
+        }
+
+        return int.MaxValue;
     }
 
     private bool IsShopItem(object interactable)
@@ -5706,7 +6625,7 @@ public sealed class UiNavigationHandler
             if (method == null)
                 return null;
 
-            foreach (var textType in new[] { _tmpTextType, _textType })
+            foreach (var textType in GetTextTypes())
             {
                 if (textType == null)
                     continue;
@@ -5805,7 +6724,7 @@ public sealed class UiNavigationHandler
             if (method == null)
                 return null;
 
-            foreach (var textType in new[] { _tmpTextType, _textType })
+            foreach (var textType in GetTextTypes())
             {
                 if (textType == null)
                     continue;
@@ -5861,7 +6780,21 @@ public sealed class UiNavigationHandler
         if (!string.IsNullOrWhiteSpace(tmp))
             return tmp;
 
+        var tmpMesh = GetComponentText(gameObject, _tmpTextMeshType);
+        if (!string.IsNullOrWhiteSpace(tmpMesh))
+            return tmpMesh;
+
         return GetComponentText(gameObject, _textType);
+    }
+
+    private IEnumerable<Type> GetTextTypes()
+    {
+        if (_tmpTextType != null)
+            yield return _tmpTextType;
+        if (_tmpTextMeshType != null)
+            yield return _tmpTextMeshType;
+        if (_textType != null)
+            yield return _textType;
     }
 
     private string GetComponentText(object gameObject, Type textType)
