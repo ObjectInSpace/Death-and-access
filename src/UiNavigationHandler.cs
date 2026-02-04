@@ -243,7 +243,11 @@ public sealed class UiNavigationHandler
             }
 
             if (submitInteractPressed)
+            {
+                if (TrySubmitDialogueContinueOnly())
+                    return;
                 SubmitInteractable();
+            }
 
             return;
         }
@@ -483,6 +487,40 @@ public sealed class UiNavigationHandler
             return no;
 
         return null;
+    }
+
+    private bool TrySubmitDialogueContinueOnly()
+    {
+        if (_dialogueScreenType == null)
+            return false;
+
+        var dialogue = GetStaticInstance(_dialogueScreenType);
+        if (!IsDialogueScreenActive(dialogue))
+            return false;
+
+        var choiceList = GetMemberValue(dialogue, "ButtonChoiceList");
+        if (choiceList is System.Collections.IEnumerable choices)
+        {
+            foreach (var entry in choices)
+            {
+                if (entry == null)
+                    continue;
+
+                var choiceButton = GetMemberValue(entry, "ButtonReference") ?? entry;
+                if (IsSelectableActive(choiceButton))
+                    return false;
+            }
+        }
+
+        var continueWrapper = GetMemberValue(dialogue, "ButtonContinue");
+        if (continueWrapper == null)
+            return false;
+
+        var continueButton = GetMemberValue(continueWrapper, "ButtonReference") ?? continueWrapper;
+        if (!IsSelectableActive(continueButton))
+            return false;
+
+        return ActivateInteractableWithFocus(continueButton);
     }
 
     private object GetFirstSelectableUnderRoots(List<object> roots)
