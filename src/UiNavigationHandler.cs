@@ -980,6 +980,9 @@ public sealed class UiNavigationHandler
         SetUiSelected(selectable);
         _lastEventSelected = GetInteractableGameObject(selectable) ?? selectable;
         SetInteractableFocus(selectable);
+        if (TryInvokeUiClickResult(selectable))
+            return true;
+
         SubmitInteractable();
         return true;
     }
@@ -992,6 +995,9 @@ public sealed class UiNavigationHandler
 
     private bool TryHandleBarNumberShortcut()
     {
+        if (IsDialogActive() || IsSpeechBubbleDialogActive())
+            return TryHandleDialogNumberShortcut();
+
         var targets = GetSceneNumberRowTargets();
         return TryHandleNumberRowFocus(targets);
     }
@@ -2003,12 +2009,11 @@ public sealed class UiNavigationHandler
         try
         {
             var method = _speechBubbleManagerType.GetMethod("IsBubbleSpeechActive", BindingFlags.Instance | BindingFlags.Public);
-            if (method == null)
-                return false;
-
-            var activeObj = method.Invoke(manager, null);
-            if (activeObj is bool active && !active)
-                return false;
+            if (method != null)
+            {
+                var activeObj = method.Invoke(manager, null);
+                _ = activeObj;
+            }
 
             var spawned = GetMemberValue(manager, "SpawnedBubbles") as System.Collections.IEnumerable;
             if (spawned == null)
@@ -5411,6 +5416,33 @@ public sealed class UiNavigationHandler
         catch
         {
             // Ignore UI invoke failures.
+        }
+    }
+
+    private bool TryInvokeUiClickResult(object target)
+    {
+        if (target == null)
+            return false;
+
+        var gameObject = GetInteractableGameObject(target) ?? target;
+        if (gameObject == null)
+            return false;
+
+        var button = GetComponentByName(gameObject, "UnityEngine.UI.Button");
+        if (button == null)
+            return false;
+
+        try
+        {
+            var onClickProp = button.GetType().GetProperty("onClick", BindingFlags.Instance | BindingFlags.Public);
+            var onClick = onClickProp?.GetValue(button);
+            var invoke = onClick?.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public);
+            invoke?.Invoke(onClick, null);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
