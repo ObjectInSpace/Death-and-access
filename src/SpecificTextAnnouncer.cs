@@ -2946,7 +2946,6 @@ public class SpecificTextAnnouncer
         public string LastDialogPrompt;
         public string LastDialogOption;
         public string LastLetterText;
-        public string LastDialogOptionsText;
     }
 
     private sealed class CoinState
