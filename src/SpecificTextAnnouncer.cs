@@ -1092,49 +1092,6 @@ public class SpecificTextAnnouncer
         return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
     }
 
-    private string GetDialogueOptionsText(object dialogue)
-    {
-        if (dialogue == null)
-            return null;
-
-        var options = new List<string>();
-        var listObj = GetFieldValue(dialogue, "ButtonChoiceList");
-        if (listObj is System.Collections.IEnumerable list)
-        {
-            var index = 1;
-            foreach (var entry in list)
-            {
-                if (entry == null)
-                    continue;
-
-                var textChoice = GetFieldValue(entry, "TextChoice");
-                if (textChoice == null)
-                    continue;
-
-                var text = GetTextValue(textChoice);
-                if (string.IsNullOrWhiteSpace(text))
-                    continue;
-
-                options.Add(index + ": " + text.Trim());
-                index++;
-            }
-        }
-
-        var continueButton = GetFieldValue(dialogue, "ButtonContinue");
-        if (continueButton != null)
-        {
-            var continueText = GetFieldValue(continueButton, "TextContinue");
-            if (continueText != null && IsVisible(continueText))
-            {
-                var text = GetTextValue(continueText);
-                if (!string.IsNullOrWhiteSpace(text))
-                    options.Add(text.Trim());
-            }
-        }
-
-        return options.Count == 0 ? null : string.Join(". ", options);
-    }
-
     private bool IsPromptShortcutPressed()
     {
         return GetKeyDown("BackQuote") || GetKeyDown("Backquote");
@@ -1404,6 +1361,9 @@ public class SpecificTextAnnouncer
         if (!ShouldAnnounceForGameObject(current))
             return;
 
+        if (TryAnnounceBarHoverFromVirtualCursor())
+            return;
+
         if (TryAnnounceDialogChoice(current))
             return;
 
@@ -1453,6 +1413,9 @@ public class SpecificTextAnnouncer
         if (!ShouldAnnounceForGameObject(current))
             return;
 
+        if (TryAnnounceBarHoverFromVirtualCursor())
+            return;
+
         if (TryAnnounceDialogChoice(current))
             return;
 
@@ -1463,6 +1426,15 @@ public class SpecificTextAnnouncer
     {
         var nav = UiNavigationHandler.Instance;
         if (nav == null)
+            return;
+
+        if (TryAnnounceBarHoverFromVirtualCursor())
+            return;
+
+        if (TryAnnounceBarHoverFromMouse())
+            return;
+
+        if (nav.IsBarSceneActiveForAnnouncements)
             return;
 
         var hovered = GetCurrentHoveredGameObject(GetCurrentEventSystem());
@@ -1477,6 +1449,40 @@ public class SpecificTextAnnouncer
             _lastMouseHoverText = text;
             AnnounceContent(text, priority: false);
         }
+    }
+
+    private bool TryAnnounceBarHoverFromVirtualCursor()
+    {
+        var nav = UiNavigationHandler.Instance;
+        if (nav == null || !nav.IsBarSceneActiveForAnnouncements)
+            return false;
+
+        if (!nav.TryGetBarHoverNameFromVirtualCursor(out var name))
+            return false;
+
+        if (string.Equals(_lastMouseHoverText, name, StringComparison.Ordinal))
+            return true;
+
+        _lastMouseHoverText = name;
+        AnnounceContent(name, priority: false);
+        return true;
+    }
+
+    private bool TryAnnounceBarHoverFromMouse()
+    {
+        var nav = UiNavigationHandler.Instance;
+        if (nav == null || !nav.IsBarSceneActiveForAnnouncements)
+            return false;
+
+        if (!nav.TryGetBarHoverNameFromMouse(out var name))
+            return false;
+
+        if (string.Equals(_lastMouseHoverText, name, StringComparison.Ordinal))
+            return true;
+
+        _lastMouseHoverText = name;
+        AnnounceContent(name, priority: false);
+        return true;
     }
 
     private bool TryAnnounceDialogChoice(object gameObject)
@@ -2293,41 +2299,6 @@ public class SpecificTextAnnouncer
         {
             return true;
         }
-    }
-
-    private bool IsMoneyComponent(object component)
-    {
-        var name = GetObjectName(component);
-        if (ContainsMoneyToken(name))
-            return true;
-
-        if (ReflectionUtils.TryGetProperty(component.GetType(), component, "gameObject", out var gameObject) && gameObject != null)
-        {
-            name = GetObjectName(gameObject);
-            if (ContainsMoneyToken(name))
-                return true;
-
-            if (ReflectionUtils.TryGetProperty(gameObject.GetType(), gameObject, "transform", out var transform) && transform != null
-                && ReflectionUtils.TryGetProperty(transform.GetType(), transform, "parent", out var parent) && parent != null)
-            {
-                name = GetObjectName(parent);
-                if (ContainsMoneyToken(name))
-                    return true;
-            }
-        }
-
-        return false;
-    }
-
-    private bool ContainsMoneyToken(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            return false;
-
-        return name.IndexOf("money", StringComparison.OrdinalIgnoreCase) >= 0
-               || name.IndexOf("textmoney", StringComparison.OrdinalIgnoreCase) >= 0
-               || name.IndexOf("moneytext", StringComparison.OrdinalIgnoreCase) >= 0
-               || name.IndexOf("moneynotification", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private bool IsMoneyNotificationText(string text)

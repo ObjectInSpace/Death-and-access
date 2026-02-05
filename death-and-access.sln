@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Death and Access", "Death and Access.csproj", "{1B68CCAA-6681-F80C-E502-731A26F45683}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1B68CCAA-6681-F80C-E502-731A26F45683}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1B68CCAA-6681-F80C-E502-731A26F45683}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1B68CCAA-6681-F80C-E502-731A26F45683}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1B68CCAA-6681-F80C-E502-731A26F45683}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {1E757BD3-C900-40CD-A75A-6FC62A43AFB7}
+	EndGlobalSection
+EndGlobal

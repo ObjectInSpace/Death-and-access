@@ -49,6 +49,8 @@ public sealed class UiNavigationHandler
     private Type _eraserType;
     private Type _salaryCoinType;
     private Type _dialogueScreenType;
+    private Type _speechBubbleManagerType;
+    private Type _speechBubbleType;
     private Type _markConfirmType;
     private Type _faxConfirmType;
     private Type _buyConfirmType;
@@ -83,6 +85,8 @@ public sealed class UiNavigationHandler
     private Type _unityObjectType;
     private Type _gameObjectType;
     private Type _transformType;
+    private Type _mirrorType;
+    private Type _mirrorNavigationButtonType;
     private Type _canvasScalerType;
     private Type _graphicRaycasterType;
     private Type _imageType;
@@ -144,6 +148,53 @@ public sealed class UiNavigationHandler
 
     internal bool IsVirtualCursorActive => _virtualCursorActive;
 
+    internal bool IsBarSceneActiveForAnnouncements => IsBarSceneActive();
+
+    internal bool TryGetBarHoverNameFromVirtualCursor(out string text)
+    {
+        text = null;
+        EnsureTypes();
+
+        if (!IsBarSceneActive())
+            return false;
+
+        if (!TryGetVirtualCursorPosition(out var x, out var y))
+            return false;
+
+        text = GetSceneObjectNameAtScreenPosition2D(x, y);
+        return !string.IsNullOrWhiteSpace(text);
+    }
+
+    internal bool TryGetBarHoverNameFromMouse(out string text)
+    {
+        text = null;
+        EnsureTypes();
+
+        if (!IsBarSceneActive())
+            return false;
+
+        var lastHit = GetInputManagerLastHit();
+        if (lastHit != null)
+        {
+            var go = GetInteractableGameObject(lastHit) ?? GetMemberValue(lastHit, "gameObject");
+            var name = GetMemberValue(go, "name")?.ToString();
+            var sanitized = SanitizeSceneObjectName(name);
+            if (!string.IsNullOrWhiteSpace(sanitized))
+            {
+                text = sanitized;
+                return true;
+            }
+        }
+
+        var raw = GetRawMousePosition();
+        if (raw == null)
+            return false;
+
+        text = GetSceneObjectNameAtScreenPosition2D(raw.Value.x, raw.Value.y);
+        return !string.IsNullOrWhiteSpace(text);
+    }
+
+
     internal void SubmitInteractableFromVirtual()
     {
         SubmitInteractable();
@@ -203,6 +254,90 @@ public sealed class UiNavigationHandler
 
         text = BuildHoverText(interactable, hoverText);
         return !string.IsNullOrWhiteSpace(text);
+    }
+
+    private bool IsBarSceneActive()
+    {
+        return !string.IsNullOrWhiteSpace(_elevatorSceneName)
+               && _elevatorSceneName.IndexOf("Bar", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private string GetSceneObjectNameAtScreenPosition2D(float x, float y)
+    {
+        if (!TryGetSceneObjectNameAtScreenPosition2D(x, y, out var name))
+            return null;
+
+        return name;
+    }
+
+    private bool TryGetSceneObjectNameAtScreenPosition2D(float x, float y, out string name)
+    {
+        name = null;
+
+        if (_cameraType == null || _physics2DType == null || _vector3Type == null)
+            return false;
+
+        var camera = GetMainCamera() ?? GetAnyCamera();
+        if (camera == null)
+            return false;
+
+        try
+        {
+            var screenVector = Activator.CreateInstance(_vector3Type, x, y, 0f);
+            var screenPointToRay = _cameraType.GetMethod("ScreenPointToRay", BindingFlags.Instance | BindingFlags.Public, null, new[] { _vector3Type }, null);
+            if (screenPointToRay == null)
+                return false;
+
+            var ray = screenPointToRay.Invoke(camera, new[] { screenVector });
+            if (ray == null)
+                return false;
+
+            var rayType = ray.GetType();
+            var getRayIntersection = _physics2DType.GetMethod("GetRayIntersection", BindingFlags.Public | BindingFlags.Static, null, new[] { rayType, typeof(float) }, null)
+                                   ?? _physics2DType.GetMethod("GetRayIntersection", BindingFlags.Public | BindingFlags.Static, null, new[] { rayType }, null);
+            if (getRayIntersection == null)
+                return false;
+
+            var args = getRayIntersection.GetParameters().Length == 2
+                ? new object[] { ray, float.PositiveInfinity }
+                : new object[] { ray };
+            var hit = getRayIntersection.Invoke(null, args);
+            if (hit == null)
+                return false;
+
+            var colliderProp = hit.GetType().GetProperty("collider", BindingFlags.Instance | BindingFlags.Public);
+            var collider = colliderProp?.GetValue(hit);
+            if (collider == null)
+                return false;
+
+            var gameObjectProp = collider.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
+            var gameObject = gameObjectProp?.GetValue(collider);
+            if (gameObject == null)
+                return false;
+
+            var rawName = GetMemberValue(gameObject, "name")?.ToString();
+            if (string.IsNullOrWhiteSpace(rawName))
+                return false;
+
+            name = SanitizeSceneObjectName(rawName);
+            return !string.IsNullOrWhiteSpace(name);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string SanitizeSceneObjectName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return null;
+
+        var cleaned = TextSanitizer.RemoveInsensitive(name, "(Clone)");
+        cleaned = TextSanitizer.RemoveInsensitive(cleaned, "SpeechBubble");
+        cleaned = TextSanitizer.RemoveInsensitive(cleaned, "Marker");
+        cleaned = cleaned.Replace("_", " ").Replace("-", " ").Trim();
+        return string.IsNullOrWhiteSpace(cleaned) ? null : cleaned;
     }
 
     public void Update()
@@ -616,7 +751,7 @@ public sealed class UiNavigationHandler
 
     private bool HandleOfficeShortcuts()
     {
-        if (IsDialogActive())
+        if (IsDialogActive() || IsSpeechBubbleDialogActive())
         {
             if (TryHandleDialogNumberShortcut())
                 return true;
@@ -628,8 +763,11 @@ public sealed class UiNavigationHandler
 
         if (IsDressingRoomActive())
         {
+            if (TryHandleDressingRoomShortcuts())
+                return true;
             if (TryHandleDressingRoomNumberShortcut())
                 return true;
+            return false;
         }
 
         if (!IsOfficeActive())
@@ -681,11 +819,20 @@ public sealed class UiNavigationHandler
                 return true;
         }
 
+        if (IsBarSceneActive())
+        {
+            if (TryHandleBarNumberShortcut())
+                return true;
+        }
+
         if (IsShopSceneActive())
         {
             if (TryHandleShopNumberShortcut())
                 return true;
         }
+
+        if (GetKeyDown("E"))
+            return ActivateElevatorReturn();
 
         if (GetKeyDown("M"))
             return AnnounceMoney();
@@ -729,38 +876,31 @@ public sealed class UiNavigationHandler
         if (!IsShopSceneActive())
             return false;
 
-        var digit = GetNumberRowDigit();
-        if (digit < 1 || digit > 4)
-            return false;
-
-        if (digit == 4)
-        {
-            var back = FindElevatorButtonInScene("Elevator")
-                       ?? FindInteractableByHoverTextContains("elevator")
-                       ?? FindInteractableByHoverTextContains("back")
-                       ?? FindInteractableByNameContains("elevator")
-                       ?? FindInteractableByNameContains("ButtonElevator");
-            if (back == null)
-                back = GetElevatorButtonForScene("Elevator");
-            var result = ActivateInteractableWithFocus(back);
-            var interactResult = TryInvokeInteract(back);
-            if (!interactResult)
-                TryInvokeUiClick(back);
-            return result || interactResult;
-        }
-
         var items = GetShopItemsOrdered();
-        var index = digit - 1;
-        if (index < 0 || index >= items.Count)
+        return TryHandleNumberRowPointer(items);
+    }
+
+    private bool TryHandleNumberRowPointer(List<object> targets)
+    {
+        var index = GetDialogNumberIndex();
+        if (index < 0)
             return false;
 
-        var target = items[index];
-        var ok = ActivateInteractableWithFocus(target);
-        if (TryInvokeInteract(target))
-            ok = true;
-        else
-            TryInvokeUiClick(target);
-        return ok;
+        var ordered = OrderTargetsByScreenPosition(targets, requireOnScreen: true);
+        if (ordered.Count == 0 || index >= ordered.Count)
+            return false;
+
+        var target = ordered[index];
+        if (!TryMoveCursorToInteractable(target))
+            return false;
+
+        var now = Environment.TickCount;
+        _keyboardNavUntilTick = now + 500;
+        _keyboardFocusUntilTick = now + 1500;
+        _keyboardFocusActive = true;
+
+        SetInteractableFocus(target);
+        return true;
     }
 
     private object GetElevatorButtonByIndex(int index)
@@ -846,48 +986,194 @@ public sealed class UiNavigationHandler
 
     private bool TryHandleDressingRoomNumberShortcut()
     {
+        var targets = GetSceneNumberRowTargets();
+        return TryHandleNumberRowFocus(targets);
+    }
+
+    private bool TryHandleBarNumberShortcut()
+    {
+        var targets = GetSceneNumberRowTargets();
+        return TryHandleNumberRowFocus(targets);
+    }
+
+    private bool TryHandleNumberRowFocus(List<object> targets)
+    {
         var index = GetDialogNumberIndex();
         if (index < 0)
             return false;
 
-        var selectable = GetSceneSelectableByIndex(index);
-        if (selectable == null)
+        var ordered = OrderTargetsByScreenPosition(targets, requireOnScreen: true);
+        if (ordered.Count == 0 || index >= ordered.Count)
             return false;
 
-        SetUiSelected(selectable);
-        _lastEventSelected = GetInteractableGameObject(selectable) ?? selectable;
-        SetInteractableFocus(selectable);
-        SubmitInteractable();
+        SetInteractableFocus(ordered[index]);
         return true;
     }
 
-    private object GetSceneSelectableByIndex(int index)
+    private List<object> GetSceneNumberRowTargets()
     {
-        if (index < 0)
-            return null;
+        var selectables = GetEligibleSelectables(requireScreen: true);
+        if (selectables.Count > 0)
+            return selectables;
 
-        var list = GetEligibleSelectables(requireScreen: true);
-        if (list.Count == 0)
-            list = GetEligibleSelectables(requireScreen: false);
+        var targets = new List<object>();
+        if (_interactableType == null)
+            return targets;
 
-        if (list.Count == 0 || index >= list.Count)
-            return null;
-
-        var ordered = new List<object>(list.Count);
-        ordered.AddRange(list);
-        ordered.Sort((left, right) =>
+        foreach (var interactable in FindSceneObjectsOfType(_interactableType))
         {
-            var leftGo = GetInteractableGameObject(left);
-            var rightGo = GetInteractableGameObject(right);
-            var leftKey = leftGo != null ? GetHierarchyOrderKey(leftGo) : null;
-            var rightKey = rightGo != null ? GetHierarchyOrderKey(rightGo) : null;
-            return string.Compare(leftKey ?? string.Empty, rightKey ?? string.Empty, StringComparison.Ordinal);
+            if (interactable == null)
+                continue;
+            if (!IsInAllowedScene(interactable))
+                continue;
+            if (!IsInteractableActive(interactable))
+                continue;
+
+            targets.Add(interactable);
+        }
+
+        return targets;
+    }
+
+    private List<object> OrderTargetsByScreenPosition(IEnumerable<object> targets, bool requireOnScreen)
+    {
+        var ordered = new List<object>();
+        if (targets == null)
+            return ordered;
+
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+        var seen = new HashSet<object>();
+        var withPos = new List<(object target, float x, float y)>();
+
+        foreach (var target in targets)
+        {
+            if (target == null || !seen.Add(target))
+                continue;
+            if (ShouldExcludeFromNumberRow(target))
+                continue;
+
+            var pos = GetInteractableScreenPosition(target);
+            if (pos == null)
+                continue;
+
+            if (requireOnScreen && width > 0 && height > 0)
+            {
+                if (pos.Value.x < 0 || pos.Value.x > width || pos.Value.y < 0 || pos.Value.y > height)
+                    continue;
+            }
+
+            withPos.Add((target, pos.Value.x, pos.Value.y));
+        }
+
+        withPos.Sort((left, right) =>
+        {
+            var cmpY = right.y.CompareTo(left.y);
+            if (cmpY != 0)
+                return cmpY;
+            return left.x.CompareTo(right.x);
         });
 
-        if (index >= ordered.Count)
-            return null;
+        foreach (var item in withPos)
+            ordered.Add(item.target);
 
-        return ordered[index];
+        return ordered;
+    }
+
+    private bool ShouldExcludeFromNumberRow(object target)
+    {
+        if (target == null)
+            return true;
+
+        if (_elevatorButtonType != null && _elevatorButtonType.IsInstanceOfType(target))
+            return true;
+
+        var name = GetGameObjectName(target);
+        if (!string.IsNullOrWhiteSpace(name) && name.IndexOf("elevator", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        var hover = GetHoverText(target);
+        if (!string.IsNullOrWhiteSpace(hover) && hover.IndexOf("elevator", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        return false;
+    }
+
+    private bool TryHandleDressingRoomShortcuts()
+    {
+        if (!IsDressingRoomActive())
+            return false;
+
+        var shiftHeld = IsShiftHeld();
+        if (GetKeyDown("H"))
+            return ActivateDressingRoomNavigation("Head", previous: shiftHeld);
+        if (GetKeyDown("B"))
+            return ActivateDressingRoomNavigation("Body", previous: shiftHeld);
+        if (GetKeyDown("M"))
+            return ActivateDressingRoomMirror();
+
+        return false;
+    }
+
+    private bool ActivateDressingRoomMirror()
+    {
+        if (_mirrorType == null)
+            return false;
+
+        var mirror = GetStaticInstance(_mirrorType);
+        return ActivateInteractableWithFocus(mirror);
+    }
+
+    private bool ActivateDressingRoomNavigation(string accessoryType, bool previous)
+    {
+        if (string.IsNullOrWhiteSpace(accessoryType) || _mirrorNavigationButtonType == null)
+            return false;
+
+        var desiredDirection = previous ? "Left" : "Right";
+
+        foreach (var button in FindSceneObjectsOfType(_mirrorNavigationButtonType))
+        {
+            if (button == null)
+                continue;
+
+            var directionValue = GetMemberValue(button, "Direction") ?? GetMemberValue(button, "direction");
+            var typeValue = GetMemberValue(button, "Type") ?? GetMemberValue(button, "type");
+
+            var direction = directionValue?.ToString();
+            var type = typeValue?.ToString();
+
+            if (string.IsNullOrWhiteSpace(direction) || string.IsNullOrWhiteSpace(type))
+                continue;
+
+            if (direction.IndexOf(desiredDirection, StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+
+            if (!string.Equals(type, accessoryType, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            return ActivateInteractableWithFocus(button);
+        }
+
+        return false;
+    }
+
+    private bool ActivateElevatorReturn()
+    {
+        var back = FindElevatorButtonInScene("Elevator")
+                   ?? FindInteractableByHoverTextContains("elevator")
+                   ?? FindInteractableByNameContains("elevator")
+                   ?? FindInteractableByHoverTextContains("back")
+                   ?? FindInteractableByNameContains("ButtonElevator");
+        if (back == null)
+            back = GetElevatorButtonForScene("Elevator");
+        if (back == null)
+            return false;
+
+        var result = ActivateInteractableWithFocus(back);
+        var interactResult = TryInvokeInteract(back);
+        if (!interactResult)
+            TryInvokeUiClick(back);
+        return result || interactResult;
     }
 
     private int GetDialogNumberIndex()
@@ -900,17 +1186,6 @@ public sealed class UiNavigationHandler
 
         if (GetKeyDown("Alpha0"))
             return 9;
-
-        return -1;
-    }
-
-    private int GetNumberRowDigit()
-    {
-        for (var i = 1; i <= 4; i++)
-        {
-            if (GetKeyDown("Alpha" + i))
-                return i;
-        }
 
         return -1;
     }
@@ -1037,6 +1312,18 @@ public sealed class UiNavigationHandler
         if (index < 0)
             return null;
 
+        if (IsSpeechBubbleDialogActive())
+        {
+            var list = GetSpeechBubbleSelectables(requireScreen: true);
+            if (list.Count == 0)
+                list = GetSpeechBubbleSelectables(requireScreen: false);
+
+            if (list.Count == 0 || index >= list.Count)
+                return null;
+
+            return list[index];
+        }
+
         var roots = GetActiveDialogRoots();
         if (roots.Count == 0)
             return null;
@@ -1065,66 +1352,6 @@ public sealed class UiNavigationHandler
             return null;
 
         return order[index];
-    }
-
-    private bool TryFindSelectableNavigationTarget(NavigationDirection direction, out object selectable)
-    {
-        selectable = null;
-        if (_selectableType == null)
-            return false;
-
-        object currentSelectable = null;
-        var current = GetCurrentSelectedGameObject();
-        if (current != null)
-            currentSelectable = GetComponentByType(current, _selectableType);
-
-        var strictCandidates = GetEligibleSelectables(requireScreen: true);
-        var looseCandidates = strictCandidates.Count > 0 ? strictCandidates : GetEligibleSelectables(requireScreen: false);
-        if (looseCandidates.Count == 0)
-            return false;
-
-        if (currentSelectable == null || !looseCandidates.Contains(currentSelectable))
-            currentSelectable = looseCandidates[0];
-
-        if (currentSelectable == null)
-            return false;
-
-        var methodName = direction switch
-        {
-            NavigationDirection.Up => "FindSelectableOnUp",
-            NavigationDirection.Down => "FindSelectableOnDown",
-            NavigationDirection.Left => "FindSelectableOnLeft",
-            NavigationDirection.Right => "FindSelectableOnRight",
-            _ => null
-        };
-
-        if (string.IsNullOrWhiteSpace(methodName))
-            return false;
-
-        try
-        {
-            var method = currentSelectable.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public);
-            if (method == null)
-                return false;
-
-            var next = method.Invoke(currentSelectable, null);
-            if (next == null)
-                return false;
-
-            if (ReferenceEquals(next, currentSelectable))
-                return false;
-
-            var strict = strictCandidates.Count > 0;
-            if (!IsSelectableEligible(next, GetScreenDimension("width"), GetScreenDimension("height"), requireScreen: strict))
-                return false;
-
-            selectable = next;
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     private bool AnnounceMoney()
@@ -1369,19 +1596,6 @@ public sealed class UiNavigationHandler
         }
     }
 
-    private bool TryMarkFocusedPaperwork(bool live)
-    {
-        if (!IsMarkerHeld())
-            return false;
-
-        var paperwork = GetFocusedPaperwork();
-        if (paperwork == null)
-            return false;
-
-        var mark = GetMemberValue(paperwork, live ? "MarkLive" : "MarkDie");
-        return TriggerInteractable(mark);
-    }
-
     private bool TryMarkPaperworkByIndex(int index, bool live)
     {
         if (!IsMarkerHeld())
@@ -1417,20 +1631,6 @@ public sealed class UiNavigationHandler
         {
             return false;
         }
-    }
-
-    private object GetFocusedPaperwork()
-    {
-        if (_paperworkType == null)
-            return null;
-
-        foreach (var paperwork in FindSceneObjectsOfType(_paperworkType))
-        {
-            if (IsPaperworkFocused(paperwork))
-                return paperwork;
-        }
-
-        return null;
     }
 
     private object GetPaperworkByIndex(int index)
@@ -1625,21 +1825,6 @@ public sealed class UiNavigationHandler
         return true;
     }
 
-    private bool ActivateOrInteractFallback(object interactable)
-    {
-        if (interactable == null)
-            return false;
-
-        if (ActivateInteractableWithFocus(interactable))
-            return true;
-
-        if (TryInvokeInteract(interactable))
-            return true;
-
-        TryInvokeUiClick(interactable);
-        return true;
-    }
-
     private bool TriggerInteractable(object interactable)
     {
         if (interactable == null)
@@ -1801,41 +1986,53 @@ public sealed class UiNavigationHandler
         return null;
     }
 
-    private string GetInteractableEnabledState(object interactable)
+    private bool IsDialogActive()
     {
-        if (interactable == null)
-            return "null";
+        return GetActiveDialogRoots().Count > 0;
+    }
+
+    private bool IsSpeechBubbleDialogActive()
+    {
+        if (_speechBubbleManagerType == null)
+            return false;
+
+        var manager = GetStaticInstance(_speechBubbleManagerType);
+        if (manager == null)
+            return false;
 
         try
         {
-            var type = interactable.GetType();
-            var enabledField = type.GetField("bIsEnabled", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-            if (enabledField != null && enabledField.GetValue(interactable) is bool enabled)
-                return enabled ? "true" : "false";
+            var method = _speechBubbleManagerType.GetMethod("IsBubbleSpeechActive", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
 
-            var enabledProp = type.GetProperty("enabled", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            if (enabledProp != null && enabledProp.GetValue(interactable) is bool enabledPropValue)
-                return enabledPropValue ? "true" : "false";
+            var activeObj = method.Invoke(manager, null);
+            if (activeObj is bool active && !active)
+                return false;
 
-            var go = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
-            if (go != null)
+            var spawned = GetMemberValue(manager, "SpawnedBubbles") as System.Collections.IEnumerable;
+            if (spawned == null)
+                return false;
+
+            foreach (var entry in spawned)
             {
-                var goType = go.GetType();
-                if (ReflectionUtils.TryGetBoolProperty(goType, go, "activeInHierarchy", out var active))
-                    return active ? "active" : "inactive";
+                if (entry == null)
+                    continue;
+
+                if (IsSpeakerSpeechBubble(entry))
+                    continue;
+
+                var button = GetMemberValue(entry, "ButtonSpeechBubble") ?? entry;
+                if (IsSelectableActive(button))
+                    return true;
             }
         }
         catch
         {
-            return "error";
+            return false;
         }
 
-        return "unknown";
-    }
-
-    private bool IsDialogActive()
-    {
-        return GetActiveDialogRoots().Count > 0;
+        return false;
     }
 
     private bool IsMenuActive()
@@ -1997,6 +2194,8 @@ public sealed class UiNavigationHandler
         _eraserType ??= TypeResolver.Get("Eraser");
         _salaryCoinType ??= TypeResolver.Get("SalaryCoin");
         _dialogueScreenType ??= TypeResolver.Get("DialogueScreen");
+        _speechBubbleManagerType ??= TypeResolver.Get("SpeechBubbleManager");
+        _speechBubbleType ??= TypeResolver.Get("SpeechBubble");
         _markConfirmType ??= TypeResolver.Get("MarkConfirm");
         _faxConfirmType ??= TypeResolver.Get("FaxConfirm");
         _buyConfirmType ??= TypeResolver.Get("BuyConfirm");
@@ -2030,6 +2229,8 @@ public sealed class UiNavigationHandler
         _unityObjectType ??= TypeResolver.Get("UnityEngine.Object");
         _gameObjectType ??= TypeResolver.Get("UnityEngine.GameObject");
         _transformType ??= TypeResolver.Get("UnityEngine.Transform");
+        _mirrorType ??= TypeResolver.Get("Mirror");
+        _mirrorNavigationButtonType ??= TypeResolver.Get("MirrorNavigationButton");
         _canvasScalerType ??= TypeResolver.Get("UnityEngine.UI.CanvasScaler");
         _graphicRaycasterType ??= TypeResolver.Get("UnityEngine.UI.GraphicRaycaster");
         _imageType ??= TypeResolver.Get("UnityEngine.UI.Image");
@@ -2951,6 +3152,8 @@ public sealed class UiNavigationHandler
 
     private List<object> GetEligibleSelectables(bool requireScreen)
     {
+        if (IsSpeechBubbleDialogActive())
+            return GetSpeechBubbleSelectables(requireScreen);
         if (IsDialogActive())
             return GetDialogSelectables(requireScreen);
         if (IsMenuActive())
@@ -2999,6 +3202,66 @@ public sealed class UiNavigationHandler
         }
 
         return eligible;
+    }
+
+    private List<object> GetSpeechBubbleSelectables(bool requireScreen)
+    {
+        var list = new List<object>();
+        if (_speechBubbleManagerType == null)
+            return list;
+
+        var manager = GetStaticInstance(_speechBubbleManagerType);
+        if (manager == null)
+            return list;
+
+        var spawned = GetMemberValue(manager, "SpawnedBubbles") as System.Collections.IEnumerable;
+        if (spawned == null)
+            return list;
+
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+
+        foreach (var entry in spawned)
+        {
+            if (entry == null)
+                continue;
+
+            if (IsSpeakerSpeechBubble(entry))
+                continue;
+
+            var button = GetMemberValue(entry, "ButtonSpeechBubble") ?? entry;
+            if (button == null || !IsSelectableActive(button))
+                continue;
+
+            if (IsSelectableEligible(button, width, height, requireScreen))
+                list.Add(button);
+        }
+
+        return list;
+    }
+
+    private bool IsSpeakerSpeechBubble(object bubble)
+    {
+        if (bubble == null || _speechBubbleManagerType == null)
+            return false;
+
+        var manager = GetStaticInstance(_speechBubbleManagerType);
+        if (manager == null)
+            return false;
+
+        try
+        {
+            var method = _speechBubbleManagerType.GetMethod("GetSpeakerBubble", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            var speaker = method.Invoke(manager, null);
+            return speaker != null && ReferenceEquals(speaker, bubble);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private List<object> GetMenuSelectables(bool requireScreen)
@@ -3146,46 +3409,6 @@ public sealed class UiNavigationHandler
         }
 
         return true;
-    }
-
-    private IEnumerable<object> GetDeskItemsFromGrimDesk()
-    {
-        if (_grimDeskType == null)
-            yield break;
-
-        object instance;
-        try
-        {
-            var instanceField = _grimDeskType.GetField("instance", BindingFlags.Public | BindingFlags.Static);
-            instance = instanceField?.GetValue(null);
-        }
-        catch
-        {
-            yield break;
-        }
-
-        if (instance == null)
-            yield break;
-
-        object deskObjects;
-        try
-        {
-            var field = _grimDeskType.GetField("DeskObjects", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-            deskObjects = field?.GetValue(instance);
-        }
-        catch
-        {
-            yield break;
-        }
-
-        if (deskObjects is not System.Collections.IEnumerable enumerable)
-            yield break;
-
-        foreach (var item in enumerable)
-        {
-            if (item != null)
-                yield return item;
-        }
     }
 
     private IEnumerable<object> GetDeskDrawersFromGrimDesk()
@@ -4718,6 +4941,11 @@ public sealed class UiNavigationHandler
         }
     }
 
+    private bool IsShiftHeld()
+    {
+        return GetKey("LeftShift") || GetKey("RightShift");
+    }
+
     private float GetAxisRaw(string axisName)
     {
         try
@@ -5217,79 +5445,6 @@ public sealed class UiNavigationHandler
 
             var lastHitField = _inputManagerType.GetField("LastHitInteractable", BindingFlags.Public | BindingFlags.Instance);
             return lastHitField?.GetValue(instance);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private object GetMouseHitInteractable()
-    {
-        if (_cameraType == null || _physics2DType == null || _vector3Type == null || _interactableType == null)
-            return null;
-
-        var camera = GetMainCamera();
-        if (camera == null)
-            return null;
-
-        if (_getMousePositionMethod == null || _getRayIntersectionMethod == null)
-            return null;
-
-        try
-        {
-            var mouse = _getMousePositionMethod.Invoke(null, null);
-            if (mouse == null)
-                return null;
-
-            var xProp = mouse.GetType().GetProperty("x", BindingFlags.Instance | BindingFlags.Public);
-            var yProp = mouse.GetType().GetProperty("y", BindingFlags.Instance | BindingFlags.Public);
-            if (xProp == null || yProp == null)
-                return null;
-
-            var xVal = xProp.GetValue(mouse);
-            var yVal = yProp.GetValue(mouse);
-            if (xVal is not float x || yVal is not float y)
-                return null;
-
-            var vector = Activator.CreateInstance(_vector3Type, x, y, 0f);
-            var rayMethod = _cameraType.GetMethod("ScreenPointToRay", BindingFlags.Instance | BindingFlags.Public, null, new[] { _vector3Type }, null);
-            if (rayMethod == null)
-                return null;
-
-            var ray = rayMethod.Invoke(camera, new[] { vector });
-            if (ray == null)
-                return null;
-
-            object hit;
-            if (_getRayIntersectionMethod.GetParameters().Length >= 2)
-            {
-                hit = _getRayIntersectionMethod.Invoke(null, new[] { ray, float.PositiveInfinity });
-            }
-            else
-            {
-                hit = _getRayIntersectionMethod.Invoke(null, new[] { ray });
-            }
-
-            if (hit == null)
-                return null;
-
-            var colliderProp = hit.GetType().GetProperty("collider", BindingFlags.Instance | BindingFlags.Public);
-            var collider = colliderProp?.GetValue(hit);
-            if (collider == null)
-                return null;
-
-            var gameObjectProp = collider.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
-            var gameObject = gameObjectProp?.GetValue(collider);
-            if (gameObject == null)
-                return null;
-
-            var getComponentInParent = gameObject.GetType().GetMethod("GetComponentInParent", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(Type) }, null);
-            if (getComponentInParent == null)
-                return null;
-
-            var interactable = getComponentInParent.Invoke(gameObject, new object[] { _interactableType });
-            return ResolveInteractableForFocus(interactable);
         }
         catch
         {
@@ -5847,6 +6002,15 @@ public sealed class UiNavigationHandler
         if (!string.IsNullOrWhiteSpace(hoverText) && IsMoneyNotificationText(hoverText))
             return null;
 
+        var dressingLabel = GetDressingRoomInteractableLabel(interactable);
+        if (!string.IsNullOrWhiteSpace(dressingLabel))
+        {
+            if (string.IsNullOrWhiteSpace(hoverText))
+                hoverText = dressingLabel;
+            else if (hoverText.IndexOf(dressingLabel, StringComparison.OrdinalIgnoreCase) < 0)
+                hoverText = $"{dressingLabel}. {hoverText}";
+        }
+
         hoverText = StripLeadingMoneySentence(hoverText);
 
         var shopItem = ResolveShopItem(interactable) ?? interactable;
@@ -5964,6 +6128,51 @@ public sealed class UiNavigationHandler
         hoverText = StripLeadingMoneySentence(hoverText);
 
         return hoverText;
+    }
+
+    private string GetDressingRoomInteractableLabel(object interactable)
+    {
+        if (interactable == null)
+            return null;
+
+        if (_mirrorNavigationButtonType != null && _mirrorNavigationButtonType.IsInstanceOfType(interactable))
+        {
+            var directionValue = GetMemberValue(interactable, "Direction") ?? GetMemberValue(interactable, "direction");
+            var typeValue = GetMemberValue(interactable, "Type") ?? GetMemberValue(interactable, "type");
+
+            var direction = directionValue?.ToString();
+            var accessory = typeValue?.ToString();
+
+            string action = null;
+            if (!string.IsNullOrWhiteSpace(direction))
+            {
+                if (direction.IndexOf("Left", StringComparison.OrdinalIgnoreCase) >= 0)
+                    action = "Previous";
+                else if (direction.IndexOf("Right", StringComparison.OrdinalIgnoreCase) >= 0)
+                    action = "Next";
+            }
+
+            string target = null;
+            if (!string.IsNullOrWhiteSpace(accessory))
+            {
+                if (string.Equals(accessory, "Head", StringComparison.OrdinalIgnoreCase))
+                    target = "head";
+                else if (string.Equals(accessory, "Body", StringComparison.OrdinalIgnoreCase))
+                    target = "body";
+                else
+                    target = accessory.ToLowerInvariant();
+            }
+
+            if (!string.IsNullOrWhiteSpace(action) && !string.IsNullOrWhiteSpace(target))
+                return $"{action} {target}";
+            if (!string.IsNullOrWhiteSpace(action))
+                return $"{action} look";
+        }
+
+        if (_mirrorType != null && _mirrorType.IsInstanceOfType(interactable))
+            return "Return to elevator";
+
+        return null;
     }
 
     private string StripLeadingMoneySentence(string text)
