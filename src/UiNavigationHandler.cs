@@ -133,6 +133,7 @@ public sealed class UiNavigationHandler
     private bool _keyboardFocusActive;
     private bool _virtualCursorActive;
     private (float x, float y) _virtualCursorPos;
+    private bool _virtualCursorMovedSinceLastSubmit;
     private string _activeSceneName;
     private string _elevatorSceneName;
     private readonly HashSet<string> _allowedSceneNames = new(StringComparer.OrdinalIgnoreCase);
@@ -400,7 +401,12 @@ public sealed class UiNavigationHandler
             return;
         }
 
-        if (direction != NavigationDirection.None && !IsOfficeActive() && ShouldDeferToEventSystem() && IsPointerOverUi())
+        if (direction != NavigationDirection.None
+            && !IsOfficeActive()
+            && !IsDressingRoomActive()
+            && !_virtualCursorActive
+            && ShouldDeferToEventSystem()
+            && IsPointerOverUi())
         {
             _pendingEventSystemSyncUntil = Environment.TickCount + 250;
             if (TryMoveEventSystemSelection(direction))
@@ -2610,6 +2616,7 @@ public sealed class UiNavigationHandler
         targetY = Math.Max(0, Math.Min(targetY, screenHeight - 1));
 
         _virtualCursorPos = (targetX, targetY);
+        _virtualCursorMovedSinceLastSubmit = true;
         UpdateVirtualCursorOverlayPosition(targetX, targetY);
         RefreshCursorSpriteIfNeeded();
     }
@@ -4187,6 +4194,20 @@ public sealed class UiNavigationHandler
                 return IsInAllowedScene(resolved) ? resolved : null;
             }
 
+            if (_mirrorNavigationButtonType != null)
+            {
+                var mirrorNav = getComponentInParent.Invoke(gameObject, new object[] { _mirrorNavigationButtonType });
+                if (mirrorNav != null && IsInAllowedScene(mirrorNav))
+                    return mirrorNav;
+            }
+
+            if (_mirrorType != null)
+            {
+                var mirror = getComponentInParent.Invoke(gameObject, new object[] { _mirrorType });
+                if (mirror != null && IsInAllowedScene(mirror))
+                    return mirror;
+            }
+
             var overlapPoint = _physics2DType.GetMethod("OverlapPoint", BindingFlags.Public | BindingFlags.Static, null, new[] { _vector2Type }, null);
             if (overlapPoint == null)
                 return null;
@@ -4208,7 +4229,24 @@ public sealed class UiNavigationHandler
             var overlapInteractable = overlapComponentInParent.Invoke(overlapGameObject, new object[] { _interactableType });
             var resolvedOverlap = ResolveInteractableForFocus(overlapInteractable);
             resolvedOverlap = FilterDialogInteractable(resolvedOverlap);
-            return IsInAllowedScene(resolvedOverlap) ? resolvedOverlap : null;
+            if (IsInAllowedScene(resolvedOverlap))
+                return resolvedOverlap;
+
+            if (_mirrorNavigationButtonType != null)
+            {
+                var mirrorNav = overlapComponentInParent.Invoke(overlapGameObject, new object[] { _mirrorNavigationButtonType });
+                if (mirrorNav != null && IsInAllowedScene(mirrorNav))
+                    return mirrorNav;
+            }
+
+            if (_mirrorType != null)
+            {
+                var mirror = overlapComponentInParent.Invoke(overlapGameObject, new object[] { _mirrorType });
+                if (mirror != null && IsInAllowedScene(mirror))
+                    return mirror;
+            }
+
+            return null;
         }
         catch
         {
@@ -5006,6 +5044,12 @@ public sealed class UiNavigationHandler
                 var hit = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
                 if (hit != null)
                     _lastFocusedInteractable = hit;
+                else if (_virtualCursorMovedSinceLastSubmit)
+                    return;
+            }
+            else if (_virtualCursorMovedSinceLastSubmit)
+            {
+                return;
             }
         }
 
@@ -5044,6 +5088,8 @@ public sealed class UiNavigationHandler
 
         if (!TryInvokeInteract(_lastFocusedInteractable))
             TryInvokeUiClick(_lastFocusedInteractable);
+
+        _virtualCursorMovedSinceLastSubmit = false;
 
         // No extra focus logic; rely on the virtual cursor + raycast.
     }
