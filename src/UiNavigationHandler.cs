@@ -356,6 +356,12 @@ public sealed class UiNavigationHandler
             return;
 
         SampleAxes(out var axisX, out var axisY);
+        if (IsMouseClickDown())
+        {
+            DeactivateVirtualCursorForUi();
+            _keyboardFocusActive = false;
+            _keyboardFocusUntilTick = 0;
+        }
         var direction = GetNavigationDirection(axisX, axisY);
         var submitInteractPressed = IsSubmitPressedForInteractables();
         if (submitInteractPressed && TryHandleIntroSkip())
@@ -372,6 +378,7 @@ public sealed class UiNavigationHandler
 
         if (IsDialogActive() && !IsOfficeActive())
         {
+            DeactivateVirtualCursorForUi();
             if (direction != NavigationDirection.None)
             {
                 _pendingEventSystemSyncUntil = Environment.TickCount + 250;
@@ -396,6 +403,7 @@ public sealed class UiNavigationHandler
 
         if (IsMenuActive() && !IsOfficeActive())
         {
+            DeactivateVirtualCursorForUi();
             if (submitInteractPressed)
                 SubmitInteractable();
             return;
@@ -2427,8 +2435,7 @@ public sealed class UiNavigationHandler
     private void UpdateVirtualCursorFocus(NavigationDirection direction, bool submitPressed, float axisX, float axisY)
     {
         var moved = UpdatePointerFromInput(axisX, axisY, direction, out var sawArrowInput);
-        if (!moved)
-            SyncVirtualCursorToRawMouse();
+        SyncVirtualCursorToRawMouse();
 
         if (_lastFocusedInteractable != null && !IsInteractableActive(_lastFocusedInteractable))
         {
@@ -2566,22 +2573,53 @@ public sealed class UiNavigationHandler
     {
         if (_virtualCursorActive)
         {
+            var raw = GetRawMousePosition();
+            if (raw != null && _lastRawMousePos != null)
+            {
+                var dx = raw.Value.x - _lastRawMousePos.Value.x;
+                var dy = raw.Value.y - _lastRawMousePos.Value.y;
+                if (Math.Abs(dx) > 0.5f || Math.Abs(dy) > 0.5f)
+                {
+                    _virtualCursorActive = false;
+                    SetVirtualCursorOverlayVisible(false);
+                    _keyboardFocusActive = false;
+                    _keyboardFocusUntilTick = 0;
+                    _lastRawMousePos = raw;
+                    return;
+                }
+            }
+
             var mouseDx = GetAxisRawAny("Mouse X", "MouseX");
             var mouseDy = GetAxisRawAny("Mouse Y", "MouseY");
             if (Math.Abs(mouseDx) > 0.01f || Math.Abs(mouseDy) > 0.01f)
             {
                 _virtualCursorActive = false;
                 SetVirtualCursorOverlayVisible(false);
+                _keyboardFocusActive = false;
+                _keyboardFocusUntilTick = 0;
             }
+
+            if (raw != null)
+                _lastRawMousePos = raw;
 
             return;
         }
 
-        var raw = GetRawMousePosition();
-        if (raw == null)
+        var rawPos = GetRawMousePosition();
+        if (rawPos == null)
             return;
 
-        _lastRawMousePos = raw;
+        _lastRawMousePos = rawPos;
+    }
+
+    private void DeactivateVirtualCursorForUi()
+    {
+        if (!_virtualCursorActive)
+            return;
+
+        _virtualCursorActive = false;
+        SetVirtualCursorOverlayVisible(false);
+        SetSystemCursorVisible(true);
     }
 
     private void MoveVirtualCursor(float dx, float dy)
@@ -4982,6 +5020,11 @@ public sealed class UiNavigationHandler
         {
             return false;
         }
+    }
+
+    private bool IsMouseClickDown()
+    {
+        return GetKeyDown("Mouse0") || GetKeyDown("Mouse1") || GetKeyDown("Mouse2");
     }
 
     private bool IsShiftHeld()
