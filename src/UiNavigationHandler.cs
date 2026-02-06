@@ -798,7 +798,7 @@ public sealed class UiNavigationHandler
             return ActivateStaticInteractable(_spinnerType);
         if (GetKeyDown("T"))
             return ActivateStaticInteractable(_catToyType);
-        if (GetKeyDown("A"))
+        if (GetKeyDown("L"))
             return ActivateStaticInteractable(_deskLampType);
         if (GetKeyDown("G"))
             return ActivateStaticInteractable(_chaosGlobeType);
@@ -3315,6 +3315,103 @@ public sealed class UiNavigationHandler
         }
     }
 
+    private string GetSpeechBubbleTextForInteractable(object interactable)
+    {
+        if (interactable == null || _speechBubbleType == null)
+            return null;
+
+        var gameObject = GetInteractableGameObject(interactable) ?? GetMemberValue(interactable, "gameObject");
+        if (gameObject == null)
+            return null;
+
+        var bubble = GetComponentInParentByType(gameObject, _speechBubbleType)
+                     ?? GetComponentByType(gameObject, _speechBubbleType);
+        if (bubble != null)
+        {
+            var text = ReadSpeechBubbleText(bubble);
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+        }
+
+        var childText = FindFirstUsefulTextInChildren(gameObject);
+        if (!string.IsNullOrWhiteSpace(childText))
+            return SanitizeHoverText(childText);
+
+        return TryGetSpeechBubbleTextFromManager(interactable);
+    }
+
+    private string TryGetSpeechBubbleTextFromManager(object interactable)
+    {
+        if (_speechBubbleManagerType == null || interactable == null)
+            return null;
+
+        var manager = GetStaticInstance(_speechBubbleManagerType);
+        if (manager == null)
+            return null;
+
+        var spawned = GetMemberValue(manager, "SpawnedBubbles") as System.Collections.IEnumerable;
+        if (spawned == null)
+            return null;
+
+        foreach (var entry in spawned)
+        {
+            if (entry == null)
+                continue;
+
+            var button = GetMemberValue(entry, "ButtonSpeechBubble") ?? entry;
+            if (!IsSameUiTarget(interactable, button))
+                continue;
+
+            var text = ReadSpeechBubbleText(entry);
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+        }
+
+        return null;
+    }
+
+    private string ReadSpeechBubbleText(object bubble)
+    {
+        if (bubble == null)
+            return null;
+
+        var textObj = GetMemberValue(bubble, "TextSpeechBubble");
+        if (textObj == null)
+            return null;
+
+        var textValue = ReadStringValue(GetMemberValue(textObj, "text")) ?? ReadStringValue(textObj);
+        return SanitizeHoverText(textValue);
+    }
+
+    private bool IsSameUiTarget(object left, object right)
+    {
+        if (left == null || right == null)
+            return false;
+
+        if (ReferenceEquals(left, right))
+            return true;
+
+        var leftGo = GetInteractableGameObject(left) ?? GetMemberValue(left, "gameObject");
+        var rightGo = GetInteractableGameObject(right) ?? GetMemberValue(right, "gameObject");
+        if (leftGo == null || rightGo == null)
+            return false;
+
+        if (ReferenceEquals(leftGo, rightGo))
+            return true;
+
+        var leftTransform = GetTransform(leftGo);
+        var rightTransform = GetTransform(rightGo);
+        if (leftTransform != null && rightTransform != null)
+        {
+            if (IsTransformChildOf(leftTransform, rightTransform))
+                return true;
+            if (IsTransformChildOf(rightTransform, leftTransform))
+                return true;
+        }
+
+        return false;
+    }
+
     private List<object> GetMenuSelectables(bool requireScreen)
     {
         var width = GetScreenDimension("width");
@@ -3980,6 +4077,24 @@ public sealed class UiNavigationHandler
         {
             return null;
         }
+    }
+
+    private object GetComponentInParentByType(object gameObject, Type type)
+    {
+        if (gameObject == null || type == null)
+            return null;
+
+        var current = gameObject;
+        for (var depth = 0; depth < 6 && current != null; depth++)
+        {
+            var component = GetComponentByType(current, type);
+            if (component != null)
+                return component;
+
+            current = GetParentGameObject(current);
+        }
+
+        return null;
     }
 
     private (float x, float y)? GetColliderBoundsCenter(object collider)
@@ -5577,6 +5692,12 @@ public sealed class UiNavigationHandler
 
     private object GetInteractableGameObject(object interactable)
     {
+        if (interactable == null)
+            return null;
+
+        if (_gameObjectType != null && _gameObjectType.IsInstanceOfType(interactable))
+            return interactable;
+
         try
         {
             var prop = interactable.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
@@ -6028,6 +6149,9 @@ public sealed class UiNavigationHandler
             if (shopItem != null)
                 hoverText = GetHoverText(shopItem);
         }
+        var speechBubbleText = GetSpeechBubbleTextForInteractable(interactable);
+        if (!string.IsNullOrWhiteSpace(speechBubbleText))
+            hoverText = speechBubbleText;
         UpdateHudHoverText(hoverText);
         AnnounceHoverText(hoverText, interactable);
     }
@@ -6122,6 +6246,10 @@ public sealed class UiNavigationHandler
 
     private string BuildHoverText(object interactable, string hoverText)
     {
+        var speechBubbleText = GetSpeechBubbleTextForInteractable(interactable);
+        if (!string.IsNullOrWhiteSpace(speechBubbleText))
+            return speechBubbleText;
+
         if (!string.IsNullOrWhiteSpace(hoverText) && IsMoneyNotificationText(hoverText))
             return null;
 
