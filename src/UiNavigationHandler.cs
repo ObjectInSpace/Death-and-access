@@ -1710,6 +1710,7 @@ public sealed class UiNavigationHandler
             return true;
         if (!TryInvokeInteract(interactable))
             TryInvokeUiClick(interactable);
+        TryAnnounceDressingRoomSelection(interactable);
         return true;
     }
 
@@ -5132,6 +5133,7 @@ public sealed class UiNavigationHandler
         if (!TryInvokeInteract(_lastFocusedInteractable))
             TryInvokeUiClick(_lastFocusedInteractable);
 
+        TryAnnounceDressingRoomSelection(_lastFocusedInteractable);
         _virtualCursorMovedSinceLastSubmit = false;
 
         // No extra focus logic; rely on the virtual cursor + raycast.
@@ -6294,6 +6296,62 @@ public sealed class UiNavigationHandler
             return "Return to elevator";
 
         return null;
+    }
+
+    private void TryAnnounceDressingRoomSelection(object interactable)
+    {
+        if (_screenreader == null)
+            return;
+
+        if (interactable == null || _mirrorNavigationButtonType == null || !_mirrorNavigationButtonType.IsInstanceOfType(interactable))
+            return;
+
+        var typeValue = GetMemberValue(interactable, "Type") ?? GetMemberValue(interactable, "type");
+        var typeText = typeValue?.ToString();
+        if (string.IsNullOrWhiteSpace(typeText))
+            return;
+
+        var mirror = _mirrorType != null ? GetStaticInstance(_mirrorType) : null;
+        if (mirror == null)
+            return;
+
+        object textObj = null;
+        if (string.Equals(typeText, "Head", StringComparison.OrdinalIgnoreCase))
+            textObj = GetMemberValue(mirror, "TextHead");
+        else if (string.Equals(typeText, "Body", StringComparison.OrdinalIgnoreCase))
+            textObj = GetMemberValue(mirror, "TextBody");
+
+        if (textObj == null)
+            return;
+
+        string selection = null;
+        try
+        {
+            var textProp = textObj.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public);
+            selection = textProp?.GetValue(textObj) as string;
+        }
+        catch
+        {
+            selection = null;
+        }
+
+        selection = SanitizeHoverText(selection);
+        if (string.IsNullOrWhiteSpace(selection))
+            return;
+
+        var label = string.Equals(typeText, "Head", StringComparison.OrdinalIgnoreCase)
+            ? "Head"
+            : string.Equals(typeText, "Body", StringComparison.OrdinalIgnoreCase)
+                ? "Body"
+                : typeText;
+
+        if (IsDialogActive())
+            return;
+
+        if (_screenreader.IsBusy)
+            return;
+
+        _screenreader.Announce($"{label}: {selection}");
     }
 
     private string StripLeadingMoneySentence(string text)
