@@ -9,7 +9,7 @@
 
 ## How to use:
 
-* Buy the game from Placeholder Gameworks (https://www.deathandtaxesgame.com) or from Steam/Itch directly. Itch has an older build than Steam at present, but the only new change appears to be Japanese localization.
+* Buy the game from Placeholder Gameworks (https://www.deathandtaxesgame.com) Available on Steam, Itch or GOG.
 * Install MellonLoader (https://github.com/LavaGang/MelonLoader/releases ) and point it to your game
 * Copy the mod DLL and NVDA controller client DLL to the mods folder of your game
 * Launch Death and Taxes. If Mellonloader is working, a command window will open with info about the game. You should then hear screenreader (or TTS if no screenreader is detected) that the mod has loaded.
