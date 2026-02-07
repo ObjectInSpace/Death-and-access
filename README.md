@@ -3,19 +3,21 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 # What this does:
 
 * enables TTS output for game text
-* detects NVDA and JAWS screenreaders. Should detect VO and Orca too but have not been tested. Narrator doesn't work yet.
-* arrow keys now move the mouse pointer. Enter selects what's under it. This should also work for the left analog stick and primary action button for your controller.
-* Drag-and-drop: press space to pick up the item under the cursor, arrow keys to move it, and space again to put it down.
-* Keyboard shortcuts to select things without relying on the pointer
+* outputs text to detected screenreaders.
+* Adds keyboard support, including drag and drop and full keyboard shortcuts
+* Adds basic controller support
+
+# 
 
 # How to use:
 
-* Buy the game from Placeholder Gameworks (https://www.deathandtaxesgame.com) or from Steam/Itch directly
+* Buy the game from Placeholder Gameworks (https://www.deathandtaxesgame.com) or from Steam/Itch directly. Itch has an older build than Steam at present, but the only new change appears to be Japanese localization.
 * Install MellonLoader (https://github.com/LavaGang/MelonLoader/releases ) and point it to your game
 * Copy the mod DLL and NVDA controller client DLL to the mods folder of your game
-* Launch Death and Taxes. If Mellonloader is working a command window will open with info about the game. You should then hear screenreader (or TTS if no screenreader is detected) that the mod has loaded.
+* Launch Death and Taxes. If Mellonloader is working, a command window will open with info about the game. You should then hear screenreader (or TTS if no screenreader is detected) that the mod has loaded.
 * et voila!
-* 
+
+# 
 
 # keyboard shortcuts:
 
@@ -23,6 +25,14 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 
 * arrows, controller left stick: move pointer
 * enter, controller action button: select
+* y: select yes in confirm dialogs
+* n: select no in confirm dialogs
+
+## Intro/end comics:
+
+* ## left/right arrows: scrolls comic
+* ## `: reads comic text
+* ## enter: skips to the end of the comic.
 
 ## Grim's office
 
@@ -32,9 +42,9 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 * m: pick up marker of death
 * 1-0: read profile
 * ctrl/command+1-0: mark live
-* &nbsp;- alt/option+1-0: mark  die
+*  - alt/option+1-0: mark  die
 
-  * f: deus fax machina 
+  * f: deus fax machina
   * \- \[: open/close left drawer
 
 * ]: open/close right drawer
@@ -65,18 +75,16 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 * ## shift+b: previous body
 * ## M: mirror (exit)
 
-## Anywhere else:
+## Mortimer's Emporium:
 
+* ## 1-3: hover shop item and read its name and description
+* ## Anywhere else:
 * m: say current money
   e: elevator
 * `: read last spoken dialog
 * 1-0: choose dialog option
 
-# known issues
 
-* The intro comic doesn't work yet. For now press enter to skip and enter again to confirm.
-* The focus in menus is messy
-* dialog shortcuts don't work in the dressing room
 
 # The elevator doesn't work!
 
@@ -85,4 +93,36 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 * After ending the day in  your quarters, you must go to Grim's office before you can go to Fate's office.
 * the dressing room is unlocked after you purchase the mirror
 * The cerberus den is only open on weekends.
-* It may take a few seconds for the elevator to move to your chosen location.
+* The elevator moves to your chosen location, which takes a few seconds.
+
+
+
+# known issues/todos:
+
+* menu focus is messy
+* dressing room conversation choices just say "speech bubble" and aren't being read when hovered
+* No support for hats!
+* broken Oink bank shortcut
+* No shortcut for spirit detection
+* Difficult to discover options in confirm dialogs, dressing room, Cerberus's den and Mortimer's emporium if you are using the arrow keys (hence all the keyboard shortcuts)
+* Narrator isn't detected
+* No proper controller support (needs SDL)
+* Untested compatibility on OSX and Linux
+* Mobile+console ports are out of scope, due to no MellonLoader
+
+If your issue isn't listed, feel free to open one.
+
+
+
+Built by dotnet 4.72 in VSCode with OpenAI Codex.
+
+
+
+Follow me on Mastodon! https://infosec.exchange/@prism
+
+Say thanks: https://paypal.me/justsendyourcash
+
+
+
+Have fun!
+
