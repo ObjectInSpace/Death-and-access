@@ -7,8 +7,6 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 * Adds keyboard support, including drag and drop and full keyboard shortcuts
 * Adds basic controller support
 
-# 
-
 # How to use:
 
 * Buy the game from Placeholder Gameworks (https://www.deathandtaxesgame.com) or from Steam/Itch directly. Itch has an older build than Steam at present, but the only new change appears to be Japanese localization.
@@ -16,8 +14,6 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 * Copy the mod DLL and NVDA controller client DLL to the mods folder of your game
 * Launch Death and Taxes. If Mellonloader is working, a command window will open with info about the game. You should then hear screenreader (or TTS if no screenreader is detected) that the mod has loaded.
 * et voila!
-
-# 
 
 # keyboard shortcuts:
 
@@ -30,11 +26,11 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 
 ## Intro/end comics:
 
-* ## left/right arrows: scrolls comic
-* ## `: reads comic text
-* ## enter: skips to the end of the comic.
+* left/right arrows: scrolls comic
+*  `: reads comic text
+*  enter: skips to the end of the comic.
 
-## Grim's office
+## Grim office
 
 * space: toggle drag and drop
 * n: phone news
@@ -43,10 +39,8 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 * 1-0: read profile
 * ctrl/command+1-0: mark live
 *  - alt/option+1-0: mark  die
-
   * f: deus fax machina
-  * \- \[: open/close left drawer
-
+  * [: open/close left drawer
 * ]: open/close right drawer
 * g: globe
 * s: spinner
@@ -69,22 +63,21 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 
 ## Dressing room:
 
-* ## h: next head
-* ## shift+h: previous head
-* ## : next body
-* ## shift+b: previous body
-* ## M: mirror (exit)
+*  h: next head
+*  shift+h: previous head
+* b: next body
+* shift+b: previous body
+* M: mirror (exit)
 
 ## Mortimer's Emporium:
 
-* ## 1-3: hover shop item and read its name and description
-* ## Anywhere else:
+* 1-3: hover shop item and read its name and description
+
+  ## Anywhere else:
 * m: say current money
-  e: elevator
+* e: elevator
 * `: read last spoken dialog
 * 1-0: choose dialog option
-
-
 
 # The elevator doesn't work!
 
@@ -95,16 +88,14 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 * The cerberus den is only open on weekends.
 * The elevator moves to your chosen location, which takes a few seconds.
 
-
-
 # known issues/todos:
 
 * menu focus is messy
 * dressing room conversation choices just say "speech bubble" and aren't being read when hovered
+* The eraser doesn't work with a number row shortcut, use arrow keys instead.
 * No support for hats!
 * broken Oink bank shortcut
 * No shortcut for spirit detection
-* Difficult to discover options in confirm dialogs, dressing room, Cerberus's den and Mortimer's emporium if you are using the arrow keys (hence all the keyboard shortcuts)
 * Narrator isn't detected
 * No proper controller support (needs SDL)
 * Untested compatibility on OSX and Linux
@@ -112,17 +103,16 @@ Death and Access: a mod to make Death and Taxes playable by the blind
 
 If your issue isn't listed, feel free to open one.
 
-
-
 Built by dotnet 4.72 in VSCode with OpenAI Codex.
 
+# Follow me!
 
+twitch:
+https://twitch.tv/object_inspace
+Mastodon:
+https://infosec.exchange/@prism
 
-Follow me on Mastodon! https://infosec.exchange/@prism
+Say thanks!:
+https://paypal.me/justsendyourcash
 
-Say thanks: https://paypal.me/justsendyourcash
-
-
-
-Have fun!
-
+Have fun!!
