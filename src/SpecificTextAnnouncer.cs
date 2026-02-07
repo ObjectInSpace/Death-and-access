@@ -65,7 +65,8 @@ public class SpecificTextAnnouncer
         {
             AnnounceScreenByInstance("IntroController");
             AnnounceScreenByInstance("SkipIntro");
-            AnnounceAllTextComponents(sceneChanged, includeInactive: true, ignoreVisibility: true);
+            var forceComicRead = IsComicScene(sceneName) && IsPromptShortcutPressed();
+            AnnounceAllTextComponents(sceneChanged || forceComicRead, includeInactive: true, ignoreVisibility: true);
             AnnounceDialogueScreen();
             AnnounceCurrentSelection();
             AnnounceCurrentHover();
@@ -2907,6 +2908,14 @@ public class SpecificTextAnnouncer
 
         return sceneName.IndexOf("Intro", StringComparison.OrdinalIgnoreCase) >= 0
             || sceneName.IndexOf("Comic", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static bool IsComicScene(string sceneName)
+    {
+        if (string.IsNullOrWhiteSpace(sceneName))
+            return false;
+
+        return sceneName.IndexOf("Comic", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private static string FormatNumber(object value)

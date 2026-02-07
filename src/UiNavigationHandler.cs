@@ -352,6 +352,8 @@ public sealed class UiNavigationHandler
         SyncEventSystemSelectionIfNeeded();
         EnsureDialogSelection();
         EnsureMenuSelection();
+        if (TryHandleComicArrowScroll())
+            return;
         if (HandleOfficeShortcuts())
             return;
 
@@ -436,6 +438,57 @@ public sealed class UiNavigationHandler
         return TriggerSkipIntro();
     }
 
+    private bool TryHandleComicArrowScroll()
+    {
+        if (!IsComicSceneActive())
+            return false;
+
+        if (IsDialogActive() || IsSpeechBubbleDialogActive() || IsMenuActive())
+            return false;
+
+        if (GetKeyDown("Return") || GetKeyDown("KeypadEnter"))
+            return TriggerSkipIntro();
+
+        var leftPressed = GetKey("LeftArrow");
+        var rightPressed = GetKey("RightArrow");
+        if (!leftPressed && !rightPressed)
+            return false;
+
+        if (IsComicScrollLocked())
+            return true;
+
+        if (_comicManagerType == null)
+            return false;
+
+        var manager = GetStaticInstance(_comicManagerType);
+        if (manager == null)
+            return false;
+
+        var velocity = 0f;
+        if (leftPressed)
+            velocity -= 0.2f;
+        if (rightPressed)
+            velocity += 0.2f;
+
+        if (Math.Abs(velocity) < 0.0001f)
+            return true;
+
+        try
+        {
+            var method = _comicManagerType.GetMethod("AddCameraVelocity", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            method.Invoke(manager, new object[] { velocity });
+            DeactivateVirtualCursorForUi();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private bool IsIntroOrComicScene()
     {
         if (_elevatorManagerType == null)
@@ -463,6 +516,36 @@ public sealed class UiNavigationHandler
         {
             return false;
         }
+    }
+
+    private bool IsComicScrollLocked()
+    {
+        if (_inputManagerType == null)
+            return false;
+
+        var instance = GetStaticInstance(_inputManagerType);
+        if (instance == null)
+            return false;
+
+        try
+        {
+            var field = _inputManagerType.GetField("bLockUntilInputEnd", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            return field?.GetValue(instance) is bool locked && locked;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsComicSceneActive()
+    {
+        if (!string.IsNullOrWhiteSpace(_activeSceneName)
+            && _activeSceneName.IndexOf("Comic", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        return !string.IsNullOrWhiteSpace(_elevatorSceneName)
+               && _elevatorSceneName.IndexOf("Comic", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private bool IsSkipIntroAvailable()
