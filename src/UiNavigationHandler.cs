@@ -352,6 +352,8 @@ public sealed class UiNavigationHandler
         SyncEventSystemSelectionIfNeeded();
         EnsureDialogSelection();
         EnsureMenuSelection();
+        if (TryHandleComicArrowScroll())
+            return;
         if (HandleOfficeShortcuts())
             return;
 
@@ -436,6 +438,57 @@ public sealed class UiNavigationHandler
         return TriggerSkipIntro();
     }
 
+    private bool TryHandleComicArrowScroll()
+    {
+        if (!IsComicSceneActive())
+            return false;
+
+        if (IsDialogActive() || IsSpeechBubbleDialogActive() || IsMenuActive())
+            return false;
+
+        if (GetKeyDown("Return") || GetKeyDown("KeypadEnter"))
+            return TriggerSkipIntro();
+
+        var leftPressed = GetKey("LeftArrow");
+        var rightPressed = GetKey("RightArrow");
+        if (!leftPressed && !rightPressed)
+            return false;
+
+        if (IsComicScrollLocked())
+            return true;
+
+        if (_comicManagerType == null)
+            return false;
+
+        var manager = GetStaticInstance(_comicManagerType);
+        if (manager == null)
+            return false;
+
+        var velocity = 0f;
+        if (leftPressed)
+            velocity -= 0.2f;
+        if (rightPressed)
+            velocity += 0.2f;
+
+        if (Math.Abs(velocity) < 0.0001f)
+            return true;
+
+        try
+        {
+            var method = _comicManagerType.GetMethod("AddCameraVelocity", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            method.Invoke(manager, new object[] { velocity });
+            DeactivateVirtualCursorForUi();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private bool IsIntroOrComicScene()
     {
         if (_elevatorManagerType == null)
@@ -463,6 +516,36 @@ public sealed class UiNavigationHandler
         {
             return false;
         }
+    }
+
+    private bool IsComicScrollLocked()
+    {
+        if (_inputManagerType == null)
+            return false;
+
+        var instance = GetStaticInstance(_inputManagerType);
+        if (instance == null)
+            return false;
+
+        try
+        {
+            var field = _inputManagerType.GetField("bLockUntilInputEnd", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            return field?.GetValue(instance) is bool locked && locked;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsComicSceneActive()
+    {
+        if (!string.IsNullOrWhiteSpace(_activeSceneName)
+            && _activeSceneName.IndexOf("Comic", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        return !string.IsNullOrWhiteSpace(_elevatorSceneName)
+               && _elevatorSceneName.IndexOf("Comic", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private bool IsSkipIntroAvailable()
@@ -767,6 +850,8 @@ public sealed class UiNavigationHandler
     {
         if (IsDialogActive() || IsSpeechBubbleDialogActive())
         {
+            if (TryHandleConfirmDialogYesNoShortcut())
+                return true;
             if (TryHandleDialogNumberShortcut())
                 return true;
             return false;
@@ -991,6 +1076,64 @@ public sealed class UiNavigationHandler
         if (selectable == null)
             return false;
 
+        return TryActivateDialogSelectable(selectable);
+    }
+
+    private bool TryHandleConfirmDialogYesNoShortcut()
+    {
+        var instance = GetActiveConfirmDialogInstance();
+        if (instance == null)
+            return false;
+
+        if (IsFaxIncompleteConfirmState(instance))
+        {
+            if (!GetKeyDown("Return") && !GetKeyDown("KeypadEnter"))
+                return false;
+
+            var ok = GetMemberValue(instance, "ButtonOk");
+            return TryActivateDialogSelectable(ok);
+        }
+
+        if (GetKeyDown("Y"))
+        {
+            var yes = GetMemberValue(instance, "ButtonYes");
+            if (!IsSelectableActive(yes))
+                yes = GetMemberValue(instance, "ButtonOk");
+
+            return TryActivateDialogSelectable(yes);
+        }
+
+        if (GetKeyDown("N"))
+        {
+            var no = GetMemberValue(instance, "ButtonNo");
+            if (!IsSelectableActive(no))
+                no = GetMemberValue(instance, "ButtonCancel");
+            if (!IsSelectableActive(no))
+                no = GetMemberValue(instance, "ButtonOk");
+
+            return TryActivateDialogSelectable(no);
+        }
+
+        return false;
+    }
+
+    private bool IsFaxIncompleteConfirmState(object instance)
+    {
+        if (instance == null || _faxConfirmType == null || !ReferenceEquals(instance.GetType(), _faxConfirmType))
+            return false;
+
+        var yes = GetMemberValue(instance, "ButtonYes");
+        var no = GetMemberValue(instance, "ButtonNo");
+        var ok = GetMemberValue(instance, "ButtonOk");
+
+        return IsSelectableActive(ok) && !IsSelectableActive(yes) && !IsSelectableActive(no);
+    }
+
+    private bool TryActivateDialogSelectable(object selectable)
+    {
+        if (!IsSelectableActive(selectable))
+            return false;
+
         SetUiSelected(selectable);
         _lastEventSelected = GetInteractableGameObject(selectable) ?? selectable;
         SetInteractableFocus(selectable);
@@ -1028,6 +1171,35 @@ public sealed class UiNavigationHandler
 
         SetInteractableFocus(ordered[index]);
         return true;
+    }
+
+    private object GetActiveConfirmDialogInstance()
+    {
+        var types = new[]
+        {
+            _markConfirmType,
+            _faxConfirmType,
+            _buyConfirmType,
+            _restartConfirmType,
+            _endDayConfirmType,
+            _comicEndConfirmType
+        };
+
+        foreach (var type in types)
+        {
+            if (type == null)
+                continue;
+
+            var instance = GetStaticInstance(type);
+            if (instance == null)
+                continue;
+
+            var go = GetMemberValue(instance, "gameObject");
+            if (go != null && IsGameObjectActive(go))
+                return instance;
+        }
+
+        return null;
     }
 
     private List<object> GetSceneNumberRowTargets()
