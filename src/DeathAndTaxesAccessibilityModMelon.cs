@@ -60,11 +60,13 @@ public class DeathAndTaxesAccessibilityModMelon : MelonMod
     {
         try
         {
+            _announcedInit = false;
             _specificTextAnnouncer?.Cleanup();
             _specificTextAnnouncer = null;
             _uiNavigationHandler = null;
             UiNavigationHandler.ClearInstance();
-            _harmony?.UnpatchSelf();
+            // Avoid unpatching during process teardown; on newer Unity builds this can
+            // trigger native shutdown instability and is unnecessary at exit.
             _harmony = null;
             
             if (_accessibilityManager != null)
@@ -72,7 +74,6 @@ public class DeathAndTaxesAccessibilityModMelon : MelonMod
                 _accessibilityManager.Dispose();
             }
             _accessibilityManager = null;
-            _announcedInit = false;
             
             MelonLogger.Msg("Death and Taxes Accessibility Mod unloaded.");
         }

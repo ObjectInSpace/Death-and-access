@@ -191,6 +191,7 @@ public class ScreenreaderProvider : IDisposable
     private const int RepeatAnnounceCooldownMs = 1000;
     private const int MaxQueueLength = 100;
     private int _suppressHoverUntilTick;
+    private bool _disposed;
 
     private static readonly HashSet<string> ExternalScreenreaderProcessNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -306,7 +307,7 @@ public class ScreenreaderProvider : IDisposable
 
     private void AnnounceInternal(string text, bool isPriority)
     {
-        if (!_enabled || string.IsNullOrWhiteSpace(text))
+        if (_disposed || !_enabled || string.IsNullOrWhiteSpace(text))
             return;
 
         text = TextSanitizer.StripRichTextTags(text);
@@ -348,6 +349,9 @@ public class ScreenreaderProvider : IDisposable
 
     private void ProcessQueue()
     {
+        if (_disposed)
+            return;
+
         UpdateExternalScreenreaderStatus();
         if (_isSpeaking || _announcementQueue.Count == 0 || !_enabled)
             return;
@@ -475,6 +479,9 @@ public class ScreenreaderProvider : IDisposable
 
     private void UpdateExternalScreenreaderStatus()
     {
+        if (_disposed)
+            return;
+
         var now = Environment.TickCount;
         if (now < _nextScreenreaderCheckTick)
             return;
@@ -653,6 +660,9 @@ public class ScreenreaderProvider : IDisposable
 
     private bool TrySpeakViaExternalScreenreader(string text, bool isPriority, bool allowUia)
     {
+        if (_disposed)
+            return false;
+
         return TrySpeakNvda(text)
                || TrySpeakJaws(text, isPriority)
                || (allowUia && ShouldUseUiaNotifications() && TryRaiseUiaNotification(text, isPriority));
@@ -819,7 +829,14 @@ public class ScreenreaderProvider : IDisposable
 
     public void Dispose()
     {
-        // Nothing to dispose for PowerShell approach
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _enabled = false;
+        _externalScreenreaderActive = false;
+        ClearQueueAndResetSpeaking();
+        TryCancelAllSpeech();
     }
 }
 
