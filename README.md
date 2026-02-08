@@ -11,7 +11,8 @@
 
 * Buy the game from Placeholder Gameworks (https://www.deathandtaxesgame.com) Available on Steam, Itch or GOG.
 * Install MellonLoader (https://github.com/LavaGang/MelonLoader/releases ) and point it to your game
-* Copy the mod DLL and NVDA controller client DLL to the mods folder of your game
+* Copy the mod DLL and both NVDA controller client DLLs to the mods folder of your game:
+  `NVDAControllerClient32.dll` and `NVDAControllerClient64.dll`
 * Launch Death and Taxes. If Mellonloader is working, a command window will open with info about the game. You should then hear screenreader (or TTS if no screenreader is detected) that the mod has loaded.
 * et voila!
 
