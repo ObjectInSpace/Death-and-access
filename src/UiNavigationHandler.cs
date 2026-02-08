@@ -7,7 +7,6 @@ using System.Runtime.CompilerServices;
 
 public sealed class UiNavigationHandler
 {
-    private const bool UseGameCursorOnly = false;
     private const int AxisRepeatMs = 150;
     private const float AxisDeadzone = 0.5f;
     private const int PointerStep = 24;
@@ -3065,9 +3064,6 @@ public sealed class UiNavigationHandler
 
     private void EnsureVirtualCursorOverlay()
     {
-        if (UseGameCursorOnly)
-            return;
-
         if (_virtualCursorCanvas != null)
         {
             SetVirtualCursorOverlayVisible(true);
@@ -3175,23 +3171,6 @@ public sealed class UiNavigationHandler
 
     private void SetVirtualCursorOverlayVisible(bool visible)
     {
-        if (UseGameCursorOnly)
-        {
-            if (_virtualCursorCanvas != null && _gameObjectType != null)
-            {
-                try
-                {
-                    var setActive = _gameObjectType.GetMethod("SetActive", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(bool) }, null);
-                    setActive?.Invoke(_virtualCursorCanvas, new object[] { false });
-                }
-                catch
-                {
-                    // Ignore.
-                }
-            }
-            return;
-        }
-
         if (_virtualCursorCanvas == null || _gameObjectType == null)
             return;
 
@@ -3208,9 +3187,6 @@ public sealed class UiNavigationHandler
 
     private void SetSystemCursorVisible(bool visible)
     {
-        if (UseGameCursorOnly)
-            return;
-
         if (_cursorType == null)
             return;
 

@@ -188,7 +188,6 @@ public class ScreenreaderProvider : IDisposable
     private bool _unity2022OrNewer;
     private string _lastAnnouncedText;
     private int _lastAnnouncedTick;
-    private const int RepeatAnnounceCooldownMs = 1000;
     private const int MaxQueueLength = 100;
     private int _suppressHoverUntilTick;
     private bool _disposed;
@@ -314,7 +313,7 @@ public class ScreenreaderProvider : IDisposable
         if (string.IsNullOrWhiteSpace(text))
             return;
 
-        if (!isPriority && ShouldSuppressRepeat(text))
+        if (ShouldSuppressRepeat(text))
             return;
 
         if (isPriority)
@@ -449,21 +448,13 @@ public class ScreenreaderProvider : IDisposable
 
     private bool ShouldSuppressRepeat(string text)
     {
-        var now = Environment.TickCount;
         if (!string.Equals(text, _lastAnnouncedText, StringComparison.Ordinal))
         {
-            UpdateLastAnnouncement(text, now);
+            UpdateLastAnnouncement(text);
             return false;
         }
 
-        var elapsed = unchecked(now - _lastAnnouncedTick);
-        if (elapsed < RepeatAnnounceCooldownMs)
-        {
-            return true;
-        }
-
-        UpdateLastAnnouncement(text, now);
-        return false;
+        return true;
     }
 
     private void UpdateLastAnnouncement(string text)
