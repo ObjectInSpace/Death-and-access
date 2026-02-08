@@ -91,7 +91,6 @@
 ## known issues/todos:
 
 * menu focus is messy
-* dressing room conversation choices just say "speech bubble" and aren't being read when hovered
 * The eraser doesn't work with a number row shortcut, use arrow keys instead.
 * No support for hats!
 * broken Oink bank shortcut
