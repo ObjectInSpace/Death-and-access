@@ -20,14 +20,21 @@
     <DefineConstants>TRACE</DefineConstants>
   </PropertyGroup>
 
-  <!-- MelonLoader References from Game Installation -->
+  <PropertyGroup>
+    <!-- Override with /p:MelonLoaderNet35Dir=... when needed -->
+    <MelonLoaderNet35Dir Condition="'$(MelonLoaderNet35Dir)'=='' and Exists('D:\Root\Death and Taxes GOG\MelonLoader\net35\MelonLoader.dll')">D:\Root\Death and Taxes GOG\MelonLoader\net35</MelonLoaderNet35Dir>
+    <MelonLoaderNet35Dir Condition="'$(MelonLoaderNet35Dir)'=='' and Exists('D:\Root\Death and Taxes\MelonLoader\net35\MelonLoader.dll')">D:\Root\Death and Taxes\MelonLoader\net35</MelonLoaderNet35Dir>
+    <MelonLoaderNet35Dir Condition="'$(MelonLoaderNet35Dir)'=='' and Exists('d:\root\death and taxes\MelonLoader\net35\MelonLoader.dll')">d:\root\death and taxes\MelonLoader\net35</MelonLoaderNet35Dir>
+  </PropertyGroup>
+
+  <!-- MelonLoader References -->
   <ItemGroup>
     <Reference Include="MelonLoader">
-      <HintPath>d:\root\death and taxes\MelonLoader\net35\MelonLoader.dll</HintPath>
+      <HintPath>$(MelonLoaderNet35Dir)\MelonLoader.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>d:\root\death and taxes\MelonLoader\net35\0Harmony.dll</HintPath>
+      <HintPath>$(MelonLoaderNet35Dir)\0Harmony.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
