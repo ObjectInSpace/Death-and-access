@@ -1400,6 +1400,9 @@ public sealed class UiNavigationHandler
 
     private int GetDialogNumberIndex()
     {
+        if (GetKeyDown("BackQuote") || GetKeyDown("Backquote"))
+            return 0;
+
         for (var i = 1; i <= 9; i++)
         {
             if (GetKeyDown("Alpha" + i))
@@ -1540,10 +1543,14 @@ public sealed class UiNavigationHandler
             if (list.Count == 0)
                 list = GetSpeechBubbleSelectables(requireScreen: false);
 
-            if (list.Count == 0 || index >= list.Count)
+            var ordered = OrderTargetsByScreenPosition(list, requireOnScreen: true);
+            if (ordered.Count == 0)
+                ordered = OrderTargetsByScreenPosition(list, requireOnScreen: false);
+
+            if (ordered.Count == 0 || index >= ordered.Count)
                 return null;
 
-            return list[index];
+            return ordered[index];
         }
 
         var roots = GetActiveDialogRoots();
