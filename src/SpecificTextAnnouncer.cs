@@ -29,6 +29,7 @@ public class SpecificTextAnnouncer
     private Type _audioSourceType;
     private Type _saveManagerType;
     private Type _articyGlobalVariablesType;
+    private Type _articyDatabaseType;
     private Type _deskLampType;
     private Type _moneyNotificationType;
     private Type _resourcesType;
@@ -125,6 +126,7 @@ public class SpecificTextAnnouncer
         _audioSourceType ??= TypeResolver.Get("UnityEngine.AudioSource");
         _saveManagerType ??= TypeResolver.Get("SaveManager");
         _articyGlobalVariablesType ??= TypeResolver.Get("Articy.Project_Of_Death.GlobalVariables.ArticyGlobalVariables");
+        _articyDatabaseType ??= TypeResolver.Get("Articy.Unity.ArticyDatabase");
         _deskLampType ??= TypeResolver.Get("DeskLamp");
         _moneyNotificationType ??= TypeResolver.Get("MoneyNotification");
         _resourcesType ??= TypeResolver.Get("UnityEngine.Resources");
@@ -327,7 +329,7 @@ public class SpecificTextAnnouncer
             if (string.IsNullOrWhiteSpace(raw))
                 return null;
 
-            return "Price " + raw.Trim();
+            return raw.Trim();
         }
         catch
         {
@@ -687,7 +689,9 @@ public class SpecificTextAnnouncer
             return;
 
         _deskLampState.IsOn = isOn;
-        AnnounceContent(isOn ? "On" : "Off", priority: false);
+        var announcement = GetLampPowerAnnouncementText(lamp, isOn);
+        if (!string.IsNullOrWhiteSpace(announcement))
+            AnnounceContent(announcement, priority: false);
     }
 
     private string ResolveDecisionCoinLabel(object coin, object sprite)
@@ -697,23 +701,78 @@ public class SpecificTextAnnouncer
 
         var skull = GetFieldValue(coin, "SpriteSkull");
         if (skull != null && ReferenceEquals(skull, sprite))
-            return "Skull";
+            return ResolveLocalizedLabelFromObjectName(skull);
 
         var ankh = GetFieldValue(coin, "SpriteAnkh");
         if (ankh != null && ReferenceEquals(ankh, sprite))
-            return "Ankh";
+            return ResolveLocalizedLabelFromObjectName(ankh);
 
         var spriteName = GetObjectName(sprite);
         if (string.IsNullOrWhiteSpace(spriteName))
             return null;
 
         if (skull != null && string.Equals(GetObjectName(skull), spriteName, StringComparison.Ordinal))
-            return "Skull";
+            return ResolveLocalizedLabelFromObjectName(skull);
 
         if (ankh != null && string.Equals(GetObjectName(ankh), spriteName, StringComparison.Ordinal))
-            return "Ankh";
+            return ResolveLocalizedLabelFromObjectName(ankh);
 
-        return spriteName;
+        return ResolveLocalizedLabelFromRawName(spriteName);
+    }
+
+    private string GetLampPowerAnnouncementText(object lamp, bool isOn)
+    {
+        if (lamp == null)
+            return null;
+
+        try
+        {
+            var hoverMethod = lamp.GetType().GetMethod("GetHoverText", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var hover = hoverMethod?.Invoke(lamp, null) as string;
+            hover = TextSanitizer.StripRichTextTags(hover)?.Trim();
+            if (!string.IsNullOrWhiteSpace(hover))
+                return hover;
+        }
+        catch
+        {
+            // Ignore hover text failures.
+        }
+
+        var localized = LocalizeArticyKey(isOn ? "on" : "off");
+        if (!string.IsNullOrWhiteSpace(localized))
+            return localized;
+
+        return null;
+    }
+
+    private string ResolveLocalizedLabelFromObjectName(object instance)
+    {
+        if (instance == null)
+            return null;
+
+        return ResolveLocalizedLabelFromRawName(GetObjectName(instance));
+    }
+
+    private string ResolveLocalizedLabelFromRawName(string rawName)
+    {
+        if (string.IsNullOrWhiteSpace(rawName))
+            return null;
+
+        var normalized = RemoveTokenIgnoreCase(rawName, "Sprite");
+        normalized = RemoveTokenIgnoreCase(normalized, "Renderer");
+        normalized = RemoveTokenIgnoreCase(normalized, "Icon");
+        normalized = RemoveTokenIgnoreCase(normalized, "Coin");
+        normalized = normalized.Replace("(Clone)", string.Empty);
+        normalized = normalized.Replace("_", " ").Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            return null;
+
+        var key = normalized.Replace(" ", "_").ToLowerInvariant();
+        var localized = LocalizeArticyKey(key);
+        if (!string.IsNullOrWhiteSpace(localized))
+            return localized;
+
+        return BuildReadableLabelFromKey(key);
     }
 
     private void AnnouncePostGame()
@@ -733,15 +792,42 @@ public class SpecificTextAnnouncer
             return null;
 
         var parts = new List<string>();
-        AddAssignedProfileValue(parts, "Name", GetAssignedProfileField(paperwork, "profile_name"));
-        AddAssignedProfileValue(parts, "Age", GetAssignedProfileField(paperwork, "profile_age_value"));
-        AddAssignedProfileValue(parts, "Position", GetAssignedProfileField(paperwork, "profile_job"));
-        AddAssignedProfileValue(parts, null, GetAssignedProfileField(paperwork, "profile_bio"));
+        AddVisibleLabeledPaperworkValue(parts, paperwork, "LabelName", "TextName");
+        AddVisibleLabeledPaperworkValue(parts, paperwork, "LabelAge", "TextAge");
+        AddVisibleLabeledPaperworkValue(parts, paperwork, "LabelPosition", "TextPosition");
+
+        var visibleSituation = TryGetVisibleTextFromField(paperwork, "TextSituation");
+        if (!string.IsNullOrWhiteSpace(visibleSituation))
+            parts.Add(visibleSituation);
+
+        if (parts.Count == 0)
+        {
+            AddAssignedProfileValue(parts, null, GetAssignedProfileField(paperwork, "profile_name"));
+            AddAssignedProfileValue(parts, null, GetAssignedProfileField(paperwork, "profile_age_value"));
+            AddAssignedProfileValue(parts, null, GetAssignedProfileField(paperwork, "profile_job"));
+            AddAssignedProfileValue(parts, null, GetAssignedProfileField(paperwork, "profile_bio"));
+        }
 
         if (parts.Count == 0)
             return null;
 
         return string.Join(". ", parts);
+    }
+
+    private void AddVisibleLabeledPaperworkValue(List<string> parts, object paperwork, string labelFieldName, string valueFieldName)
+    {
+        if (parts == null || paperwork == null)
+            return;
+
+        var value = TryGetVisibleTextFromField(paperwork, valueFieldName);
+        if (string.IsNullOrWhiteSpace(value))
+            return;
+
+        var label = TryGetVisibleTextFromField(paperwork, labelFieldName);
+        if (string.IsNullOrWhiteSpace(label))
+            parts.Add(value);
+        else
+            parts.Add(label + " " + value);
     }
 
     private void AddAssignedProfileValue(List<string> parts, string label, string value)
@@ -771,39 +857,144 @@ public class SpecificTextAnnouncer
         if (rep == null)
             return null;
 
-        var worstValue = GetMemberValue(rep, "worst_parameter_value");
-        var worstName = GetMemberValue(rep, "worst_parameter_name") as string;
-        var ecologyValue = GetMemberValue(rep, "ecology");
-        var peaceValue = GetMemberValue(rep, "peace");
-        var prosperityValue = GetMemberValue(rep, "prosperity");
-        var healthValue = GetMemberValue(rep, "health");
-
-        var formattedValue = FormatNumber(worstValue);
-        var ecologyText = FormatNumber(ecologyValue);
-        var peaceText = FormatNumber(peaceValue);
-        var prosperityText = FormatNumber(prosperityValue);
-        var healthText = FormatNumber(healthValue);
-
-        var parts = new List<string>();
-
-        if (!string.IsNullOrWhiteSpace(formattedValue))
-            parts.Add("Snowglobe score " + formattedValue);
-        if (!string.IsNullOrWhiteSpace(ecologyText))
-            parts.Add("Ecology " + ecologyText);
-        if (!string.IsNullOrWhiteSpace(peaceText))
-            parts.Add("Peace " + peaceText);
-        if (!string.IsNullOrWhiteSpace(prosperityText))
-            parts.Add("Prosperity " + prosperityText);
-        if (!string.IsNullOrWhiteSpace(healthText))
-            parts.Add("Health " + healthText);
-
-        if (!string.IsNullOrWhiteSpace(worstName) && !string.IsNullOrWhiteSpace(formattedValue))
-            parts.Add("Worst parameter " + worstName.Trim() + " " + formattedValue);
+        var parts = new List<string>(4);
+        var statKeys = GetChaosStatKeysFromScene();
+        foreach (var statKey in statKeys)
+        {
+            var value = GetMemberValue(rep, statKey);
+            var valueText = FormatNumber(value);
+            AppendLocalizedChaosStat(parts, rep, statKey, valueText);
+        }
 
         if (parts.Count == 0)
             return null;
 
-        return string.Join(". ", parts) + ".";
+        return string.Join(". ", parts);
+    }
+
+    private List<string> GetChaosStatKeysFromScene()
+    {
+        var keys = new List<string>();
+        var globe = GetStaticInstance("ChaosGlobe");
+        if (globe == null)
+            return keys;
+
+        var fields = globe.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        foreach (var field in fields)
+        {
+            var name = field?.Name;
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+
+            if (!name.EndsWith("Renderer", StringComparison.Ordinal))
+                continue;
+
+            if (name.IndexOf("Target", StringComparison.OrdinalIgnoreCase) >= 0)
+                continue;
+
+            if (name.IndexOf("Inside", StringComparison.OrdinalIgnoreCase) >= 0)
+                continue;
+
+            var key = name.Substring(0, name.Length - "Renderer".Length);
+            if (string.IsNullOrWhiteSpace(key))
+                continue;
+
+            var normalized = key.Trim().ToLowerInvariant();
+            if (normalized.Length == 0)
+                continue;
+
+            if (!keys.Contains(normalized))
+                keys.Add(normalized);
+        }
+
+        return keys;
+    }
+
+    private void AppendLocalizedChaosStat(List<string> parts, object rep, string statKey, string valueText)
+    {
+        if (parts == null || rep == null || string.IsNullOrWhiteSpace(statKey) || string.IsNullOrWhiteSpace(valueText))
+            return;
+
+        var label = ResolveLocalizedChaosStatLabel(rep, statKey);
+        if (string.IsNullOrWhiteSpace(label))
+            return;
+
+        parts.Add(label + " " + valueText);
+    }
+
+    private string ResolveLocalizedChaosStatLabel(object rep, string statKey)
+    {
+        if (rep == null || string.IsNullOrWhiteSpace(statKey))
+            return null;
+
+        var unresolvedWorst = GetMemberValue(rep, "Unresolved_worst_parameter_name") as string;
+        var localizedWorst = GetMemberValue(rep, "worst_parameter_name") as string;
+        if (string.Equals(unresolvedWorst, statKey, StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(localizedWorst))
+        {
+            return localizedWorst.Trim();
+        }
+
+        var unresolvedBest = GetMemberValue(rep, "Unresolved_best_parameter_name") as string;
+        var localizedBest = GetMemberValue(rep, "best_parameter_name") as string;
+        if (string.Equals(unresolvedBest, statKey, StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(localizedBest))
+        {
+            return localizedBest.Trim();
+        }
+
+        var localized = LocalizeArticyKey(statKey);
+        if (!string.IsNullOrWhiteSpace(localized))
+            return localized;
+
+        return BuildReadableLabelFromKey(statKey);
+    }
+
+    private string LocalizeArticyKey(string key)
+    {
+        if (string.IsNullOrWhiteSpace(key) || _articyDatabaseType == null)
+            return null;
+
+        try
+        {
+            var localization = GetStaticMemberValue(_articyDatabaseType, "Localization");
+            if (localization == null)
+                return null;
+
+            var method = localization.GetType().GetMethod(
+                "Localize",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(string) },
+                null);
+            if (method == null)
+                return null;
+
+            var localized = method.Invoke(localization, new object[] { key }) as string;
+            if (string.IsNullOrWhiteSpace(localized))
+                return null;
+
+            return localized.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string BuildReadableLabelFromKey(string key)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+            return null;
+
+        var normalized = key.Trim().Replace("_", " ");
+        if (normalized.Length == 0)
+            return null;
+
+        if (normalized.Length == 1)
+            return normalized.ToUpperInvariant();
+
+        return char.ToUpperInvariant(normalized[0]) + normalized.Substring(1);
     }
 
     private string BuildPaperworkMarkStatusText(object paperwork)
@@ -819,9 +1010,11 @@ public class SpecificTextAnnouncer
             return null;
         }
 
-        return string.Equals(markStatusText, "Live", StringComparison.OrdinalIgnoreCase)
-            ? "Marked live"
-            : "Marked die";
+        var statusLabelField = string.Equals(markStatusText, "Live", StringComparison.OrdinalIgnoreCase)
+            ? "LabelLive"
+            : "LabelDie";
+
+        return TryGetVisibleTextFromField(paperwork, statusLabelField, allowPlaceholderValue: true);
     }
 
     private string BuildLampResultText(object paperwork)
@@ -840,6 +1033,145 @@ public class SpecificTextAnnouncer
             return null;
         }
 
+        var visibleText = BuildLampResultTextFromVisibleText(paperwork);
+        if (!string.IsNullOrWhiteSpace(visibleText))
+            return visibleText;
+
+        return BuildLampResultTextFromProfileData(paperwork, markStatusText);
+    }
+
+    private string TryGetVisibleTextFromField(object instance, string fieldName, bool allowPlaceholderValue = false)
+    {
+        if (instance == null || string.IsNullOrWhiteSpace(fieldName))
+            return null;
+
+        var component = GetFieldValue(instance, fieldName);
+        if (component == null || !IsComponentInActiveScene(component) || !IsVisible(component))
+            return null;
+
+        var text = GetTextValue(component);
+        text = TextSanitizer.StripRichTextTags(text)?.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        if (!allowPlaceholderValue && IsPlaceholderValue(text))
+            return null;
+
+        return text;
+    }
+
+    private string BuildLampResultTextFromVisibleText(object paperwork)
+    {
+        if (paperwork == null)
+            return null;
+
+        var excludedComponents = new List<object>();
+        foreach (var field in new[] { "TextName", "TextAge", "TextPosition", "TextSituation", "LabelName", "LabelAge", "LabelPosition", "LabelLive", "LabelDie" })
+        {
+            var component = GetFieldValue(paperwork, field);
+            if (component != null)
+                excludedComponents.Add(component);
+        }
+
+        var resultLines = new List<string>();
+        CollectVisiblePaperworkText(paperwork, _tmpTextType, excludedComponents, resultLines);
+        CollectVisiblePaperworkText(paperwork, _uiTextType, excludedComponents, resultLines);
+
+        return resultLines.Count == 0 ? null : string.Join(". ", resultLines);
+    }
+
+    private void CollectVisiblePaperworkText(object paperwork, Type textType, List<object> excludedComponents, List<string> results)
+    {
+        if (paperwork == null || textType == null || results == null)
+            return;
+
+        var method = paperwork.GetType().GetMethod(
+            "GetComponentsInChildren",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            null,
+            new[] { typeof(Type), typeof(bool) },
+            null);
+
+        Array components = null;
+        if (method != null)
+        {
+            try
+            {
+                components = method.Invoke(paperwork, new object[] { textType, true }) as Array;
+            }
+            catch
+            {
+                components = null;
+            }
+        }
+
+        if (components == null)
+        {
+            method = paperwork.GetType().GetMethod(
+                "GetComponentsInChildren",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(Type) },
+                null);
+
+            if (method == null)
+                return;
+
+            try
+            {
+                components = method.Invoke(paperwork, new object[] { textType }) as Array;
+            }
+            catch
+            {
+                return;
+            }
+        }
+
+        if (components == null)
+            return;
+
+        foreach (var component in components)
+        {
+            if (component == null)
+                continue;
+
+            if (ContainsReference(excludedComponents, component))
+                continue;
+
+            if (!IsComponentInActiveScene(component) || !IsVisible(component))
+                continue;
+
+            var text = GetTextValue(component);
+            text = TextSanitizer.StripRichTextTags(text)?.Trim();
+            if (string.IsNullOrWhiteSpace(text) || IsPlaceholderValue(text))
+                continue;
+
+            if (results.Contains(text))
+                continue;
+
+            results.Add(text);
+        }
+    }
+
+    private static bool ContainsReference(List<object> items, object candidate)
+    {
+        if (items == null || candidate == null)
+            return false;
+
+        foreach (var item in items)
+        {
+            if (ReferenceEquals(item, candidate))
+                return true;
+        }
+
+        return false;
+    }
+
+    private string BuildLampResultTextFromProfileData(object paperwork, string markStatusText)
+    {
+        if (paperwork == null || string.IsNullOrWhiteSpace(markStatusText))
+            return null;
+
         var profile = GetProfileFromPaperwork(paperwork);
         if (profile == null)
             return null;
@@ -847,8 +1179,6 @@ public class SpecificTextAnnouncer
         var profileId = GetMemberValue(profile, "Id");
         var hasSinBulb = GetInventoryFlag("sin_bulb");
         var revealStats = ShouldRevealLampStats(markStatusText, profileId, hasSinBulb);
-
-        var parts = new List<string>();
         if (!revealStats)
             return null;
 
@@ -863,15 +1193,55 @@ public class SpecificTextAnnouncer
         if (data == null)
             return null;
 
-        AppendLampValue(parts, "Ecology", GetMemberValue(data, GetLampValueField(markStatusText, "ecology")));
-        AppendLampValue(parts, "Prosperity", GetMemberValue(data, GetLampValueField(markStatusText, "prosperity")));
-        AppendLampValue(parts, "Health", GetMemberValue(data, GetLampValueField(markStatusText, "healthcare")));
-        AppendLampValue(parts, "Peace", GetMemberValue(data, GetLampValueField(markStatusText, "peace")));
+        var parts = new List<string>();
+        AppendLampValue(parts, ResolveLampStatLabel(paperwork, "SpriteSinEco"), GetMemberValue(data, GetLampValueField(markStatusText, "ecology")));
+        AppendLampValue(parts, ResolveLampStatLabel(paperwork, "SpriteSinProsperity"), GetMemberValue(data, GetLampValueField(markStatusText, "prosperity")));
+        AppendLampValue(parts, ResolveLampStatLabel(paperwork, "SpriteSinHealth"), GetMemberValue(data, GetLampValueField(markStatusText, "healthcare")));
+        AppendLampValue(parts, ResolveLampStatLabel(paperwork, "SpriteSinPeace"), GetMemberValue(data, GetLampValueField(markStatusText, "peace")));
 
         if (parts.Count == 0)
             return null;
 
-        return string.Join(". ", parts) + ".";
+        return string.Join(". ", parts);
+    }
+
+    private string ResolveLampStatLabel(object paperwork, string spriteFieldName)
+    {
+        if (paperwork == null || string.IsNullOrWhiteSpace(spriteFieldName))
+            return null;
+
+        var sprite = GetFieldValue(paperwork, spriteFieldName);
+        if (sprite == null)
+            return null;
+
+        var gameObject = GetMemberValue(sprite, "gameObject");
+        var raw = GetObjectName(gameObject) ?? GetObjectName(sprite);
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+
+        var normalized = RemoveTokenIgnoreCase(raw, "Sprite");
+        normalized = RemoveTokenIgnoreCase(normalized, "Sin");
+        normalized = RemoveTokenIgnoreCase(normalized, "Icon");
+        normalized = RemoveTokenIgnoreCase(normalized, "Renderer");
+        normalized = normalized.Replace("_", " ").Trim();
+
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+    }
+
+    private static string RemoveTokenIgnoreCase(string value, string token)
+    {
+        if (string.IsNullOrWhiteSpace(value) || string.IsNullOrWhiteSpace(token))
+            return value;
+
+        var result = value;
+        while (true)
+        {
+            var index = result.IndexOf(token, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+                return result;
+
+            result = result.Remove(index, token.Length);
+        }
     }
 
     private object GetProfileFromPaperwork(object paperwork)
@@ -986,14 +1356,12 @@ public class SpecificTextAnnouncer
         if (!TryGetFloat(rawValue, out var value))
             return;
 
-        if (value > 0f)
-        {
-            parts.Add(label + " up");
-        }
-        else if (value < 0f)
-        {
-            parts.Add(label + " down");
-        }
+        var rounded = (int)Math.Round(value);
+        if (rounded == 0)
+            return;
+
+        var sign = rounded > 0 ? "+" : string.Empty;
+        parts.Add(label + " " + sign + rounded.ToString());
     }
 
     private bool IsLampOn()

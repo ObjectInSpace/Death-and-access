@@ -7093,7 +7093,7 @@ public sealed class UiNavigationHandler
         if (dayNumber <= 0)
             return null;
 
-        return "Day " + dayNumber;
+        return dayNumber.ToString();
     }
 
     private int GetCurrentDayNumber()
