@@ -492,11 +492,12 @@ public class ScreenreaderProvider : IDisposable
         bool active = IsScreenReaderFlagSet(_narratorDetected);
         try
         {
-            foreach (var process in Process.GetProcesses())
+            foreach (var processName in ExternalScreenreaderProcessNames)
             {
                 try
                 {
-                    if (ExternalScreenreaderProcessNames.Contains(process.ProcessName))
+                    var matching = Process.GetProcessesByName(processName);
+                    if (matching != null && matching.Length > 0)
                     {
                         active = true;
                         break;
@@ -504,7 +505,7 @@ public class ScreenreaderProvider : IDisposable
                 }
                 catch
                 {
-                    // Ignore processes that exit or deny access.
+                    // Ignore access/read failures for individual process names.
                 }
             }
         }

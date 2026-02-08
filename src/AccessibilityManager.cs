@@ -23,7 +23,6 @@ public class AccessibilityManager : IDisposable
     {
         if (_isInitialized) return;
         _screenreader.Enabled = true;
-        _screenreader.Announce("Death and Taxes Accessibility Mod loaded. Screenreader support is now active.");
         _isInitialized = true;
     }
 
