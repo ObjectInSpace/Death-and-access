@@ -15,7 +15,7 @@ internal static class InputMousePositionPatch
     private static bool Prefix(ref object __result)
     {
         var nav = UiNavigationHandler.Instance;
-        if (nav == null || !nav.IsVirtualCursorActive)
+        if (nav == null || !nav.IsVirtualCursorActive || nav.ShouldBypassVirtualMousePositionPatch)
             return true;
 
         if (!nav.TryGetVirtualCursorPosition(out var x, out var y))
@@ -56,7 +56,10 @@ internal static class InputGetMouseButtonPatch
         if (button != 0 || nav == null || !nav.IsVirtualCursorActive)
             return true;
 
-        __result = VirtualMouseState.GetHeld();
+        if (!VirtualMouseState.GetHeld())
+            return true;
+
+        __result = true;
         return false;
     }
 }
@@ -76,7 +79,10 @@ internal static class InputGetMouseButtonDownPatch
         if (button != 0 || nav == null || !nav.IsVirtualCursorActive)
             return true;
 
-        __result = VirtualMouseState.GetDown();
+        if (!VirtualMouseState.GetDown())
+            return true;
+
+        __result = true;
         return false;
     }
 }
@@ -96,7 +102,10 @@ internal static class InputGetMouseButtonUpPatch
         if (button != 0 || nav == null || !nav.IsVirtualCursorActive)
             return true;
 
-        __result = VirtualMouseState.GetUp();
+        if (!VirtualMouseState.GetUp())
+            return true;
+
+        __result = true;
         return false;
     }
 }
