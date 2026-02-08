@@ -3,6 +3,7 @@ namespace Death_and_Access;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -182,11 +183,15 @@ public class ScreenreaderProvider : IDisposable
     private bool _jawsAvailable;
     private object _jawsApi;
     private MethodInfo _jawsSayString;
+    private bool _narratorDetected;
+    private bool _unity2022OrNewerChecked;
+    private bool _unity2022OrNewer;
     private string _lastAnnouncedText;
     private int _lastAnnouncedTick;
     private const int RepeatAnnounceCooldownMs = 1000;
     private const int MaxQueueLength = 100;
     private int _suppressHoverUntilTick;
+    private bool _disposed;
 
     private static readonly HashSet<string> ExternalScreenreaderProcessNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -302,7 +307,7 @@ public class ScreenreaderProvider : IDisposable
 
     private void AnnounceInternal(string text, bool isPriority)
     {
-        if (!_enabled || string.IsNullOrWhiteSpace(text))
+        if (_disposed || !_enabled || string.IsNullOrWhiteSpace(text))
             return;
 
         text = TextSanitizer.StripRichTextTags(text);
@@ -344,10 +349,10 @@ public class ScreenreaderProvider : IDisposable
 
     private void ProcessQueue()
     {
-        UpdateExternalScreenreaderStatus();
-        if (_externalScreenreaderActive)
+        if (_disposed)
             return;
 
+        UpdateExternalScreenreaderStatus();
         if (_isSpeaking || _announcementQueue.Count == 0 || !_enabled)
             return;
 
@@ -474,20 +479,25 @@ public class ScreenreaderProvider : IDisposable
 
     private void UpdateExternalScreenreaderStatus()
     {
+        if (_disposed)
+            return;
+
         var now = Environment.TickCount;
         if (now < _nextScreenreaderCheckTick)
             return;
 
         _nextScreenreaderCheckTick = now + ScreenreaderCheckIntervalMs;
 
-        bool active = IsScreenReaderFlagSet();
+        _narratorDetected = IsNarratorWindowPresent();
+        bool active = IsScreenReaderFlagSet(_narratorDetected);
         try
         {
-            foreach (var process in Process.GetProcesses())
+            foreach (var processName in ExternalScreenreaderProcessNames)
             {
                 try
                 {
-                    if (ExternalScreenreaderProcessNames.Contains(process.ProcessName))
+                    var matching = Process.GetProcessesByName(processName);
+                    if (matching != null && matching.Length > 0)
                     {
                         active = true;
                         break;
@@ -495,7 +505,7 @@ public class ScreenreaderProvider : IDisposable
                 }
                 catch
                 {
-                    // Ignore processes that exit or deny access.
+                    // Ignore access/read failures for individual process names.
                 }
             }
         }
@@ -519,12 +529,12 @@ public class ScreenreaderProvider : IDisposable
         }
     }
 
-    private static bool IsScreenReaderFlagSet()
+    private static bool IsScreenReaderFlagSet(bool narratorDetected)
     {
         if (!IsWindows())
             return false;
 
-        if (IsNarratorWindowPresent())
+        if (narratorDetected)
             return true;
 
         try
@@ -538,16 +548,6 @@ public class ScreenreaderProvider : IDisposable
         catch
         {
             // Ignore failures and fall back to process detection.
-        }
-
-        try
-        {
-            if (UiaClientsAreListening())
-                return true;
-        }
-        catch
-        {
-            // Ignore failures and fall back to UIA window detection.
         }
 
         return false;
@@ -584,6 +584,7 @@ public class ScreenreaderProvider : IDisposable
 
     private bool TryRaiseUiaNotification(string text, bool isPriority)
     {
+        IntPtr provider = IntPtr.Zero;
         try
         {
             if (!IsUiaAvailable())
@@ -598,7 +599,7 @@ public class ScreenreaderProvider : IDisposable
             if (hwnd == IntPtr.Zero)
                 return false;
 
-            if (UiaHostProviderFromHwnd(hwnd, out var provider) != 0 || provider == IntPtr.Zero)
+            if (UiaHostProviderFromHwnd(hwnd, out provider) != 0 || provider == IntPtr.Zero)
                 return false;
 
             var kind = NotificationKind.Other;
@@ -609,6 +610,20 @@ public class ScreenreaderProvider : IDisposable
         catch
         {
             return false;
+        }
+        finally
+        {
+            if (provider != IntPtr.Zero)
+            {
+                try
+                {
+                    Marshal.Release(provider);
+                }
+                catch
+                {
+                    // Ignore release failures.
+                }
+            }
         }
     }
 
@@ -646,9 +661,52 @@ public class ScreenreaderProvider : IDisposable
 
     private bool TrySpeakViaExternalScreenreader(string text, bool isPriority, bool allowUia)
     {
+        if (_disposed)
+            return false;
+
         return TrySpeakNvda(text)
                || TrySpeakJaws(text, isPriority)
-               || (allowUia && TryRaiseUiaNotification(text, isPriority));
+               || (allowUia && ShouldUseUiaNotifications() && TryRaiseUiaNotification(text, isPriority));
+    }
+
+    private bool ShouldUseUiaNotifications()
+    {
+        // UIA notifications are unstable on newer Unity player builds.
+        // Keep them only for Narrator on older builds where they are needed.
+        return _narratorDetected && !IsUnity2022OrNewer();
+    }
+
+    private bool IsUnity2022OrNewer()
+    {
+        if (_unity2022OrNewerChecked)
+            return _unity2022OrNewer;
+
+        _unity2022OrNewerChecked = true;
+
+        try
+        {
+            var appType = TypeResolver.Get("UnityEngine.Application");
+            var unityVersionProp = appType?.GetProperty("unityVersion", BindingFlags.Public | BindingFlags.Static);
+            var unityVersion = unityVersionProp?.GetValue(null) as string;
+            if (string.IsNullOrWhiteSpace(unityVersion))
+            {
+                _unity2022OrNewer = false;
+                return false;
+            }
+
+            var yearEnd = unityVersion.IndexOf('.');
+            if (yearEnd > 0 && int.TryParse(unityVersion.Substring(0, yearEnd), out var majorYear))
+            {
+                _unity2022OrNewer = majorYear >= 2022;
+                return _unity2022OrNewer;
+            }
+        }
+        catch
+        {
+            _unity2022OrNewer = false;
+        }
+
+        return _unity2022OrNewer;
     }
 
     private bool TrySpeakNvda(string text)
@@ -677,9 +735,15 @@ public class ScreenreaderProvider : IDisposable
 
         _nvdaAvailableChecked = true;
 
+        if (!NvdaController.EnsureClientLoaded())
+        {
+            _nvdaAvailable = false;
+            return false;
+        }
+
         try
         {
-            var res = NvdaController.TestIfRunning();
+            _ = NvdaController.TestIfRunning();
             _nvdaAvailable = true;
             return true;
         }
@@ -766,34 +830,314 @@ public class ScreenreaderProvider : IDisposable
 
     public void Dispose()
     {
-        // Nothing to dispose for PowerShell approach
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _enabled = false;
+        _externalScreenreaderActive = false;
+        ClearQueueAndResetSpeaking();
+        TryCancelAllSpeech();
     }
 }
 
 internal static class NvdaController
 {
-    [DllImport("nvdaControllerClient.dll", CharSet = CharSet.Unicode)]
-    private static extern int nvdaController_speakText(string text);
+    private static bool _loadAttempted;
+    private static bool _loaded;
+    private static IntPtr _moduleHandle;
+    private static NvdaSpeakTextDelegate _speakText;
+    private static NvdaCancelSpeechDelegate _cancelSpeech;
+    private static NvdaTestIfRunningDelegate _testIfRunning;
 
-    [DllImport("nvdaControllerClient.dll")]
-    private static extern int nvdaController_cancelSpeech();
+    [UnmanagedFunctionPointer(CallingConvention.Winapi, CharSet = CharSet.Unicode)]
+    private delegate int NvdaSpeakTextDelegate(string text);
 
-    [DllImport("nvdaControllerClient.dll")]
-    private static extern int nvdaController_testIfRunning();
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate int NvdaCancelSpeechDelegate();
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate int NvdaTestIfRunningDelegate();
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string lpFileName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FreeLibrary(IntPtr hModule);
+
+    public static bool EnsureClientLoaded()
+    {
+        if (_loadAttempted)
+            return _loaded;
+
+        _loadAttempted = true;
+
+        foreach (var path in GetCandidatePaths())
+        {
+            try
+            {
+                if (!File.Exists(path))
+                    continue;
+
+                if (TryLoadClient(path, out _))
+                {
+                    _loaded = true;
+                    return true;
+                }
+            }
+            catch
+            {
+                // Ignore and try next path.
+            }
+        }
+
+        foreach (var dllName in GetDllNames())
+        {
+            try
+            {
+                if (TryLoadClient(dllName, out _))
+                {
+                    _loaded = true;
+                    return true;
+                }
+            }
+            catch
+            {
+                // Ignore and report unavailable.
+            }
+        }
+
+        _loaded = false;
+        return false;
+    }
+
+    private static bool TryLoadClient(string pathOrName, out int errorCode)
+    {
+        errorCode = 0;
+
+        var module = LoadLibrary(pathOrName);
+        if (module == IntPtr.Zero)
+        {
+            errorCode = Marshal.GetLastWin32Error();
+            return false;
+        }
+
+        if (!TryBindExports(module, out errorCode))
+        {
+            try
+            {
+                _ = FreeLibrary(module);
+            }
+            catch
+            {
+                // Ignore cleanup failures.
+            }
+
+            return false;
+        }
+
+        _moduleHandle = module;
+        return true;
+    }
+
+    private static bool TryBindExports(IntPtr module, out int errorCode)
+    {
+        errorCode = 0;
+        try
+        {
+            var speakPtr = GetProcAddressWithFallback(module, "nvdaController_speakText", 4);
+            if (speakPtr == IntPtr.Zero)
+            {
+                errorCode = Marshal.GetLastWin32Error();
+                return false;
+            }
+
+            var cancelPtr = GetProcAddressWithFallback(module, "nvdaController_cancelSpeech", 0);
+            if (cancelPtr == IntPtr.Zero)
+            {
+                errorCode = Marshal.GetLastWin32Error();
+                return false;
+            }
+
+            var testPtr = GetProcAddressWithFallback(module, "nvdaController_testIfRunning", 0);
+            if (testPtr == IntPtr.Zero)
+            {
+                errorCode = Marshal.GetLastWin32Error();
+                return false;
+            }
+
+            _speakText = Marshal.GetDelegateForFunctionPointer<NvdaSpeakTextDelegate>(speakPtr);
+            _cancelSpeech = Marshal.GetDelegateForFunctionPointer<NvdaCancelSpeechDelegate>(cancelPtr);
+            _testIfRunning = Marshal.GetDelegateForFunctionPointer<NvdaTestIfRunningDelegate>(testPtr);
+            return _speakText != null && _cancelSpeech != null && _testIfRunning != null;
+        }
+        catch
+        {
+            errorCode = Marshal.GetLastWin32Error();
+            _speakText = null;
+            _cancelSpeech = null;
+            _testIfRunning = null;
+            return false;
+        }
+    }
+
+    private static IntPtr GetProcAddressWithFallback(IntPtr module, string baseName, int stdcallStackBytes)
+    {
+        if (module == IntPtr.Zero || string.IsNullOrWhiteSpace(baseName))
+            return IntPtr.Zero;
+
+        // x64 exports are typically undecorated, x86 stdcall exports may be decorated.
+        var names = new[]
+        {
+            baseName,
+            "_" + baseName + "@" + stdcallStackBytes,
+            baseName + "@" + stdcallStackBytes
+        };
+
+        foreach (var name in names)
+        {
+            var ptr = GetProcAddress(module, name);
+            if (ptr != IntPtr.Zero)
+                return ptr;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private static IEnumerable<string> GetDllNames()
+    {
+        if (Environment.Is64BitProcess)
+        {
+            yield return "NVDAControllerClient64.dll";
+            yield return "nvdaControllerClient64.dll";
+            yield return "nvdaControllerClient.dll";
+            yield break;
+        }
+
+        yield return "NVDAControllerClient32.dll";
+        yield return "nvdaControllerClient32.dll";
+        yield return "nvdaControllerClient.dll";
+    }
+
+    private static IEnumerable<string> GetCandidatePaths()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var dir in GetCandidateDirectories())
+        {
+            if (string.IsNullOrWhiteSpace(dir))
+                continue;
+
+            string fullDir;
+            try
+            {
+                fullDir = Path.GetFullPath(dir);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (!seen.Add(fullDir))
+                continue;
+
+            foreach (var dllName in GetDllNames())
+            {
+                yield return Path.Combine(fullDir, dllName);
+            }
+
+            foreach (var subDir in GetArchitectureSubdirectories(fullDir))
+            {
+                foreach (var dllName in GetDllNames())
+                {
+                    yield return Path.Combine(subDir, dllName);
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<string> GetArchitectureSubdirectories(string parentDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(parentDirectory))
+            yield break;
+
+        foreach (var name in GetPreferredArchitectureFolderNames())
+        {
+            string path;
+            try
+            {
+                path = Path.Combine(parentDirectory, name);
+            }
+            catch
+            {
+                continue;
+            }
+
+            yield return path;
+        }
+    }
+
+    private static IEnumerable<string> GetPreferredArchitectureFolderNames()
+    {
+        if (Environment.Is64BitProcess)
+        {
+            yield return "x64";
+            yield return "x86";
+            yield return "arm64";
+            yield break;
+        }
+
+        yield return "x86";
+        yield return "x64";
+        yield return "arm64";
+    }
+
+    private static IEnumerable<string> GetCandidateDirectories()
+    {
+        var assemblyDir = Path.GetDirectoryName(typeof(NvdaController).Assembly.Location);
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        var currentDir = Environment.CurrentDirectory;
+
+        yield return assemblyDir;
+        if (!string.IsNullOrWhiteSpace(assemblyDir))
+            yield return Directory.GetParent(assemblyDir)?.FullName;
+
+        yield return baseDir;
+        yield return currentDir;
+
+        if (!string.IsNullOrWhiteSpace(baseDir))
+        {
+            yield return Path.Combine(baseDir, "Mods");
+            yield return Path.Combine(baseDir, "UserLibs");
+            yield return Path.Combine(baseDir, "Plugins");
+            yield return Path.Combine(baseDir, "MelonLoader", "Mods");
+            yield return Path.Combine(baseDir, "MelonLoader", "net35");
+            yield return Path.Combine(baseDir, "MelonLoader", "Dependencies");
+            yield return Path.Combine(baseDir, "MelonLoader", "Dependencies", "SupportModules");
+        }
+    }
 
     public static int TestIfRunning()
     {
-        return nvdaController_testIfRunning();
+        if (!EnsureClientLoaded() || _testIfRunning == null)
+            return -1;
+
+        return _testIfRunning();
     }
 
     public static void Speak(string text, bool interrupt)
     {
+        if (!EnsureClientLoaded() || _speakText == null || _cancelSpeech == null)
+            throw new DllNotFoundException("No loadable NVDA controller client DLL.");
+
         if (interrupt)
         {
-            nvdaController_cancelSpeech();
+            _cancelSpeech();
         }
 
-        var res = nvdaController_speakText(text);
+        var res = _speakText(text);
         if (res != 0)
         {
             throw new System.ComponentModel.Win32Exception(res);
