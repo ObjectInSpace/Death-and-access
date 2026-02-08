@@ -38,6 +38,7 @@ public class SpecificTextAnnouncer
     private object _lastHoveredGameObject;
     private LampState _deskLampState;
     private string _lastSceneName;
+    private string _lastAnnouncedChoiceText;
     private string _lastShopHoverText;
     private string _lastMouseHoverText;
     private readonly Dictionary<string, object> _keyCodes = new(StringComparer.OrdinalIgnoreCase);
@@ -59,6 +60,8 @@ public class SpecificTextAnnouncer
 
         var sceneChanged = !string.Equals(sceneName, _lastSceneName, StringComparison.Ordinal);
         _lastSceneName = sceneName;
+        if (sceneChanged)
+            _lastAnnouncedChoiceText = null;
         _suppressMoneyNotifications = string.Equals(sceneName, "Elevator", StringComparison.OrdinalIgnoreCase);
 
         if (IsIntroOrComicScene(sceneName))
@@ -1365,6 +1368,9 @@ public class SpecificTextAnnouncer
         if (TryAnnounceBarHoverFromVirtualCursor())
             return;
 
+        if (TryAnnounceSpeechBubbleChoice(current))
+            return;
+
         if (TryAnnounceDialogChoice(current))
             return;
 
@@ -1417,6 +1423,9 @@ public class SpecificTextAnnouncer
         if (TryAnnounceBarHoverFromVirtualCursor())
             return;
 
+        if (TryAnnounceSpeechBubbleChoice(current))
+            return;
+
         if (TryAnnounceDialogChoice(current))
             return;
 
@@ -1439,6 +1448,9 @@ public class SpecificTextAnnouncer
             return;
 
         var hovered = GetCurrentHoveredGameObject(GetCurrentEventSystem());
+        if (TryAnnounceSpeechBubbleChoice(hovered))
+            return;
+
         if (TryAnnounceDialogChoice(hovered))
             return;
 
@@ -1507,7 +1519,51 @@ public class SpecificTextAnnouncer
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
-        AnnounceContent(text.Trim(), priority: true);
+        return TryAnnounceChoiceText(text);
+    }
+
+    private bool TryAnnounceSpeechBubbleChoice(object gameObject)
+    {
+        if (gameObject == null || _selectableType == null)
+            return false;
+
+        var selectable = GetComponentInParent(gameObject, _selectableType);
+        if (selectable == null)
+            return false;
+
+        var bubble = GetComponentInParent(gameObject, "SpeechBubble");
+        if (bubble == null)
+            return false;
+
+        var textObj = GetFieldValue(bubble, "TextSpeechBubble");
+        var text = GetTextValue(textObj);
+        if (string.IsNullOrWhiteSpace(text)
+            && ReflectionUtils.TryGetProperty(bubble.GetType(), bubble, "gameObject", out var bubbleGameObject)
+            && bubbleGameObject != null)
+        {
+            text = GetFirstTextInChildren(bubbleGameObject);
+        }
+
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        return TryAnnounceChoiceText(text);
+    }
+
+    private bool TryAnnounceChoiceText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var normalized = text.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            return false;
+
+        if (string.Equals(_lastAnnouncedChoiceText, normalized, StringComparison.Ordinal))
+            return true;
+
+        _lastAnnouncedChoiceText = normalized;
+        AnnounceContent(normalized, priority: true);
         return true;
     }
 
@@ -2368,6 +2424,8 @@ public class SpecificTextAnnouncer
 
         var cleaned = TextSanitizer.RemoveInsensitive(name, "(Clone)");
         cleaned = TextSanitizer.RemoveInsensitive(cleaned, "shop item template");
+        cleaned = TextSanitizer.RemoveInsensitive(cleaned, "speech bubble");
+        cleaned = TextSanitizer.RemoveInsensitive(cleaned, "SpeechBubble");
         cleaned = cleaned.Trim();
 
         return string.IsNullOrWhiteSpace(cleaned) ? null : cleaned;
