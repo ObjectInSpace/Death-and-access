@@ -69,7 +69,7 @@ public class SpecificTextAnnouncer
             AnnounceScreenByInstance("IntroController");
             AnnounceScreenByInstance("SkipIntro");
             var forceComicRead = IsComicScene(sceneName) && IsPromptShortcutPressed();
-            AnnounceAllTextComponents(sceneChanged || forceComicRead, includeInactive: true, ignoreVisibility: true);
+            AnnounceAllTextComponents(sceneChanged || forceComicRead, includeInactive: false, ignoreVisibility: false);
             AnnounceDialogueScreen();
             AnnounceCurrentSelection();
             AnnounceCurrentHover();
