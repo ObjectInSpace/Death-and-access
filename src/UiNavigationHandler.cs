@@ -351,6 +351,7 @@ public sealed class UiNavigationHandler
 
         SyncEventSystemSelectionIfNeeded();
         EnsureDialogSelection();
+        EnsureSpeechBubbleSelection();
         EnsureMenuSelection();
         if (TryHandleComicArrowScroll())
             return;
@@ -378,7 +379,7 @@ public sealed class UiNavigationHandler
         if (TryAdjustFocusedSlider(direction))
             return;
 
-        if (IsDialogActive() && !IsOfficeActive())
+        if (IsDialogActive() || IsSpeechBubbleDialogActive())
         {
             DeactivateVirtualCursorForUi();
             if (direction != NavigationDirection.None)
@@ -681,6 +682,44 @@ public sealed class UiNavigationHandler
             if (selectables.Count > 0)
                 preferred = selectables[0];
         }
+
+        if (preferred == null)
+            return;
+
+        SetUiSelected(preferred);
+        _lastEventSelected = GetInteractableGameObject(preferred) ?? preferred;
+        SetInteractableFocus(preferred);
+
+        var now = Environment.TickCount;
+        _keyboardNavUntilTick = now + 500;
+        _keyboardFocusUntilTick = now + 1500;
+        _keyboardFocusActive = true;
+    }
+
+    private void EnsureSpeechBubbleSelection()
+    {
+        if (!IsSpeechBubbleDialogActive())
+            return;
+
+        var current = GetCurrentSelectedGameObject();
+        if (current != null)
+        {
+            var currentGo = GetInteractableGameObject(current) ?? current;
+            var existing = GetSpeechBubbleSelectables(requireScreen: false);
+            foreach (var selectable in existing)
+            {
+                var selectableGo = GetInteractableGameObject(selectable) ?? GetMemberValue(selectable, "gameObject") ?? selectable;
+                if (selectableGo != null && ReferenceEquals(selectableGo, currentGo))
+                    return;
+            }
+        }
+
+        var preferred = default(object);
+        var selectables = GetSpeechBubbleSelectables(requireScreen: true);
+        if (selectables.Count == 0)
+            selectables = GetSpeechBubbleSelectables(requireScreen: false);
+        if (selectables.Count > 0)
+            preferred = selectables[0];
 
         if (preferred == null)
             return;
