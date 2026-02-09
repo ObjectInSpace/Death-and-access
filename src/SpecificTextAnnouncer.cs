@@ -64,6 +64,8 @@ public class SpecificTextAnnouncer
         if (sceneChanged)
             _lastAnnouncedChoiceText = null;
         _suppressMoneyNotifications = string.Equals(sceneName, "Elevator", StringComparison.OrdinalIgnoreCase);
+        if (!IsComicScene(sceneName))
+            TryReplayDialogShortcut();
 
         if (IsIntroOrComicScene(sceneName))
         {
@@ -160,16 +162,32 @@ public class SpecificTextAnnouncer
 
             if (IsPromptShortcutPressed())
             {
-                var replay = !string.IsNullOrWhiteSpace(prompt) ? prompt : state.LastDialogPrompt;
-                if (!string.IsNullOrWhiteSpace(replay))
+                if (_screenreader?.ReplayLastAnnouncement() == true)
                 {
                     _screenreader?.SuppressHoverFor(2000);
-                    AnnounceContent(replay, priority: true);
+                }
+                else
+                {
+                    var replay = !string.IsNullOrWhiteSpace(prompt) ? prompt : state.LastDialogPrompt;
+                    if (!string.IsNullOrWhiteSpace(replay))
+                    {
+                        _screenreader?.SuppressHoverFor(2000);
+                        _screenreader?.AnnouncePriorityReplay(replay);
+                    }
                 }
             }
 
             state.LastDialogPrompt = prompt;
         });
+    }
+
+    private void TryReplayDialogShortcut()
+    {
+        if (!IsPromptShortcutPressed())
+            return;
+
+        _screenreader?.SuppressHoverFor(2000);
+        _screenreader?.ReplayLastAnnouncement();
     }
 
     private void AnnounceHUD()
