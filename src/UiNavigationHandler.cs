@@ -70,6 +70,7 @@ public sealed class UiNavigationHandler
     private Type _pointerEventDataType;
     private Type _raycastResultType;
     private Type _selectableType;
+    private Type _buttonType;
     private Type _canvasType;
     private Type _rectTransformUtilityType;
     private Type _canvasGroupType;
@@ -154,6 +155,7 @@ public sealed class UiNavigationHandler
 
     internal bool IsVirtualCursorActive => _virtualCursorActive;
     internal bool ShouldBypassVirtualMousePositionPatch => _readingRawMousePosition;
+    internal bool IsDialogUiActiveForAnnouncements => IsDialogActive() || IsSpeechBubbleDialogActive();
 
     internal bool IsBarSceneActiveForAnnouncements => IsBarSceneActive();
 
@@ -388,17 +390,23 @@ public sealed class UiNavigationHandler
 
         if (IsDialogActive() || IsSpeechBubbleDialogActive())
         {
+            var confirmInstance = GetActiveConfirmDialogInstance();
+            if (confirmInstance != null)
+                SyncConfirmDialogSelection(confirmInstance);
+
             SyncUnifiedCursorForUi(preferKeyboardSelection: false);
             if (direction != NavigationDirection.None)
             {
                 _suppressMouseUiSyncFromKeyboard = true;
-                MoveUnifiedCursorByDirection(direction);
+                if (!TryMoveDialogCursorToNearestOption(direction))
+                    MoveUnifiedCursorByDirection(direction);
             }
 
             if (submitInteractPressed)
             {
-                if (TrySubmitDialogueContinueOnly())
+                if (confirmInstance == null && TrySubmitDialogueContinueOnly())
                     return;
+
                 SubmitInteractable();
             }
 
@@ -1167,11 +1175,7 @@ public sealed class UiNavigationHandler
         SetUiSelected(selectable);
         _lastEventSelected = GetInteractableGameObject(selectable) ?? selectable;
         SetInteractableFocus(selectable);
-        if (TryInvokeUiClickResult(selectable))
-            return true;
-
-        SubmitInteractable();
-        return true;
+        return TryInvokeUiClickResult(selectable);
     }
 
     private bool TryHandleDressingRoomNumberShortcut()
@@ -2439,6 +2443,7 @@ public sealed class UiNavigationHandler
         _pointerEventDataType ??= TypeResolver.Get("UnityEngine.EventSystems.PointerEventData");
         _raycastResultType ??= TypeResolver.Get("UnityEngine.EventSystems.RaycastResult");
         _selectableType ??= TypeResolver.Get("UnityEngine.UI.Selectable");
+        _buttonType ??= TypeResolver.Get("UnityEngine.UI.Button");
         _canvasType ??= TypeResolver.Get("UnityEngine.Canvas");
         _rectTransformUtilityType ??= TypeResolver.Get("UnityEngine.RectTransformUtility");
         _canvasGroupType ??= TypeResolver.Get("UnityEngine.CanvasGroup");
@@ -2938,6 +2943,163 @@ public sealed class UiNavigationHandler
 
             bestScore = score;
             best = selectable;
+        }
+
+        if (best == null)
+            return false;
+
+        SetUiSelected(best);
+        _lastEventSelected = GetInteractableGameObject(best) ?? best;
+        SetInteractableFocus(best);
+        TrySyncUnifiedCursorToSelectedUi();
+        return true;
+    }
+
+    private bool TryMoveDialogCursorToNearestOption(NavigationDirection direction)
+    {
+        if ((!IsDialogActive() && !IsSpeechBubbleDialogActive()) || direction == NavigationDirection.None)
+            return false;
+
+        var selectables = GetDialogSelectables(requireScreen: true);
+        if (selectables.Count == 0)
+            selectables = GetDialogSelectables(requireScreen: false);
+        if (selectables.Count == 0)
+            return false;
+
+        var candidates = new List<object>(selectables.Count);
+        foreach (var selectable in selectables)
+        {
+            var target = ResolveUiFocusTarget(selectable) ?? selectable;
+            if (!IsSelectableActive(target))
+                continue;
+
+            var duplicate = false;
+            foreach (var existing in candidates)
+            {
+                if (IsSameUiTarget(existing, target))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+                candidates.Add(target);
+        }
+
+        if (candidates.Count == 0)
+            return false;
+
+        (float x, float y)? origin = null;
+
+        var selected = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
+        if (selected != null)
+            origin = GetInteractableScreenPosition(selected);
+
+        if (origin == null && TryGetHoveredUiTarget(out var hoveredTarget))
+        {
+            var hovered = ResolveUiFocusTarget(hoveredTarget) ?? hoveredTarget;
+            origin = GetInteractableScreenPosition(hovered);
+        }
+
+        if (origin == null && _virtualCursorActive)
+            origin = _virtualCursorPos;
+
+        if (origin == null)
+            return false;
+
+        const float epsilon = 0.01f;
+        object best = null;
+        var bestScore = float.PositiveInfinity;
+
+        foreach (var candidate in candidates)
+        {
+            var pos = GetInteractableScreenPosition(candidate);
+            if (pos == null)
+                continue;
+
+            var dx = pos.Value.x - origin.Value.x;
+            var dy = pos.Value.y - origin.Value.y;
+
+            var inDirection = direction switch
+            {
+                NavigationDirection.Left => dx < -epsilon,
+                NavigationDirection.Right => dx > epsilon,
+                NavigationDirection.Up => dy > epsilon,
+                NavigationDirection.Down => dy < -epsilon,
+                _ => false
+            };
+            if (!inDirection)
+                continue;
+
+            var score = (dx * dx) + (dy * dy);
+            if (score >= bestScore)
+                continue;
+
+            bestScore = score;
+            best = candidate;
+        }
+
+        if (best == null)
+        {
+            object wrapBest = null;
+            var wrapAxis = 0f;
+            var wrapDist = float.PositiveInfinity;
+            var hasWrap = false;
+
+            foreach (var candidate in candidates)
+            {
+                var pos = GetInteractableScreenPosition(candidate);
+                if (pos == null)
+                    continue;
+
+                var axisValue = direction switch
+                {
+                    NavigationDirection.Left => pos.Value.x,
+                    NavigationDirection.Right => pos.Value.x,
+                    NavigationDirection.Up => pos.Value.y,
+                    NavigationDirection.Down => pos.Value.y,
+                    _ => 0f
+                };
+
+                var dx = pos.Value.x - origin.Value.x;
+                var dy = pos.Value.y - origin.Value.y;
+                var dist = (dx * dx) + (dy * dy);
+
+                if (!hasWrap)
+                {
+                    hasWrap = true;
+                    wrapBest = candidate;
+                    wrapAxis = axisValue;
+                    wrapDist = dist;
+                    continue;
+                }
+
+                var betterAxis = direction switch
+                {
+                    NavigationDirection.Left => axisValue > wrapAxis + epsilon,
+                    NavigationDirection.Right => axisValue < wrapAxis - epsilon,
+                    NavigationDirection.Up => axisValue < wrapAxis - epsilon,
+                    NavigationDirection.Down => axisValue > wrapAxis + epsilon,
+                    _ => false
+                };
+
+                if (betterAxis)
+                {
+                    wrapBest = candidate;
+                    wrapAxis = axisValue;
+                    wrapDist = dist;
+                    continue;
+                }
+
+                if (Math.Abs(axisValue - wrapAxis) <= epsilon && dist < wrapDist)
+                {
+                    wrapBest = candidate;
+                    wrapDist = dist;
+                }
+            }
+
+            best = wrapBest;
         }
 
         if (best == null)
@@ -3866,12 +4028,20 @@ public sealed class UiNavigationHandler
                     selectableComponent = selectableFromGo;
             }
 
+            var targetGameObject = GetInteractableGameObject(selectableComponent ?? selectable) ?? selectable;
+            var currentSelected = GetCurrentSelectedGameObject();
+            var currentTarget = ResolveUiFocusTarget(currentSelected) ?? currentSelected;
+            if (currentTarget != null && IsSameUiTarget(currentTarget, targetGameObject))
+            {
+                TrySyncUnifiedCursorToSelectedUi();
+                return;
+            }
+
             var selectMethod = selectableComponent?.GetType().GetMethod("Select", BindingFlags.Instance | BindingFlags.Public);
             selectMethod?.Invoke(selectableComponent, null);
 
-            var gameObject = GetInteractableGameObject(selectableComponent ?? selectable) ?? selectable;
             var setSelected = _eventSystemType.GetMethod("SetSelectedGameObject", BindingFlags.Instance | BindingFlags.Public);
-            setSelected?.Invoke(eventSystem, new[] { gameObject, null });
+            setSelected?.Invoke(eventSystem, new[] { targetGameObject, null });
             TrySyncUnifiedCursorToSelectedUi();
         }
         catch
@@ -5632,6 +5802,20 @@ public sealed class UiNavigationHandler
 
     private void SubmitInteractable()
     {
+        var confirmInstance = GetActiveConfirmDialogInstance();
+        if (confirmInstance != null)
+        {
+            var confirmTarget = ResolveConfirmDialogSubmitTarget(confirmInstance);
+            if (confirmTarget != null)
+            {
+                if (TryActivateDialogSelectable(confirmTarget))
+                {
+                    _virtualCursorMovedSinceLastSubmit = false;
+                    return;
+                }
+            }
+        }
+
         var uiObject = GetUiRaycastGameObject();
         if (uiObject != null)
         {
@@ -5714,6 +5898,180 @@ public sealed class UiNavigationHandler
         _virtualCursorMovedSinceLastSubmit = false;
 
         // No extra focus logic; rely on the virtual cursor + raycast.
+    }
+
+    private object ResolveConfirmDialogSubmitTarget(object confirmInstance)
+    {
+        if (confirmInstance == null)
+            return null;
+
+        var confirmGo = GetMemberValue(confirmInstance, "gameObject");
+        if (confirmGo == null || !IsGameObjectActive(confirmGo))
+            return null;
+
+        var confirmRoots = new List<object> { confirmGo };
+        var yes = GetMemberValue(confirmInstance, "ButtonYes");
+        var no = GetMemberValue(confirmInstance, "ButtonNo");
+        var cancel = GetMemberValue(confirmInstance, "ButtonCancel");
+        var ok = GetMemberValue(confirmInstance, "ButtonOk");
+
+        object ResolveActionCandidate(object candidate)
+        {
+            if (candidate == null)
+                return null;
+
+            var target = ResolveUiFocusTarget(candidate) ?? candidate;
+            var targetGo = GetInteractableGameObject(target) ?? GetGameObjectFromComponent(target) ?? target;
+            if (targetGo == null || !IsUnderDialogRoot(targetGo, confirmRoots))
+                return null;
+
+            var button = _buttonType != null
+                ? GetComponentByType(targetGo, _buttonType) ?? GetComponentInParentByType(targetGo, _buttonType)
+                : GetComponentByName(targetGo, "UnityEngine.UI.Button");
+            if (IsSelectableActive(button))
+                return button;
+
+            return IsSelectableActive(target) ? target : null;
+        }
+
+        var pointerHover = GetCurrentPointerEnterGameObject();
+        if (pointerHover != null)
+        {
+            var hoveredAction = ResolveActionCandidate(pointerHover);
+            if (hoveredAction != null)
+            {
+                var hoveredGo = GetInteractableGameObject(hoveredAction) ?? hoveredAction;
+                if (IsUnderDialogRoot(hoveredGo, confirmRoots))
+                    return hoveredAction;
+            }
+        }
+
+        var hovered = GetUiRaycastGameObject();
+        if (hovered != null)
+        {
+            var hoveredAction = ResolveActionCandidate(hovered);
+            if (hoveredAction != null)
+            {
+                var hoveredGo = GetInteractableGameObject(hoveredAction) ?? hoveredAction;
+                if (IsUnderDialogRoot(hoveredGo, confirmRoots))
+                    return hoveredAction;
+            }
+        }
+
+        var selected = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
+        if (selected != null)
+        {
+            var selectedAction = ResolveActionCandidate(selected);
+            if (selectedAction != null)
+            {
+                var selectedGo = GetInteractableGameObject(selectedAction) ?? selectedAction;
+                if (IsUnderDialogRoot(selectedGo, confirmRoots))
+                    return selectedAction;
+            }
+        }
+
+        var lastEvent = ResolveUiFocusTarget(_lastEventSelected) ?? _lastEventSelected;
+        if (lastEvent != null)
+        {
+            var lastEventAction = ResolveActionCandidate(lastEvent);
+            if (lastEventAction != null)
+            {
+                var lastEventGo = GetInteractableGameObject(lastEventAction) ?? lastEventAction;
+                if (IsUnderDialogRoot(lastEventGo, confirmRoots))
+                    return lastEventAction;
+            }
+        }
+
+        var focused = ResolveUiFocusTarget(_lastFocusedInteractable) ?? _lastFocusedInteractable;
+        if (focused != null)
+        {
+            var focusedAction = ResolveActionCandidate(focused);
+            if (focusedAction != null)
+            {
+                var focusedGo = GetInteractableGameObject(focusedAction) ?? focusedAction;
+                if (IsUnderDialogRoot(focusedGo, confirmRoots))
+                    return focusedAction;
+            }
+        }
+
+        if (IsFaxIncompleteConfirmState(confirmInstance) && IsSelectableActive(ok))
+            return ok;
+
+        if (IsSelectableActive(yes))
+            return yes;
+        if (IsSelectableActive(no))
+            return no;
+        if (IsSelectableActive(cancel))
+            return cancel;
+        if (IsSelectableActive(ok))
+            return ok;
+
+        return null;
+    }
+
+    private void SyncConfirmDialogSelection(object confirmInstance)
+    {
+        var target = ResolveConfirmDialogSubmitTarget(confirmInstance);
+        if (target == null)
+            return;
+
+        SetUiSelected(target);
+        _lastEventSelected = GetInteractableGameObject(target) ?? target;
+        SetInteractableFocus(target);
+    }
+
+    private object GetCurrentPointerEnterGameObject()
+    {
+        if (_eventSystemType == null)
+            return null;
+
+        try
+        {
+            var currentProp = _eventSystemType.GetProperty("current", BindingFlags.Static | BindingFlags.Public);
+            var eventSystem = currentProp?.GetValue(null);
+            if (eventSystem == null)
+                return null;
+
+            var inputModuleProp = _eventSystemType.GetProperty("currentInputModule", BindingFlags.Instance | BindingFlags.Public);
+            var inputModule = inputModuleProp?.GetValue(eventSystem);
+            if (inputModule == null)
+                return null;
+
+            var method = inputModule.GetType().GetMethod("GetLastPointerEventData", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (method == null)
+                return null;
+
+            var pointerData = method.Invoke(inputModule, new object[] { -1 });
+            if (pointerData == null)
+                return null;
+
+            var hoverProp = pointerData.GetType().GetProperty("pointerEnter", BindingFlags.Instance | BindingFlags.Public);
+            var hovered = hoverProp?.GetValue(pointerData);
+            return hovered != null && IsInAllowedScene(hovered) ? hovered : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal bool TryGetHoveredUiTarget(out object target)
+    {
+        target = null;
+        var hovered = GetCurrentPointerEnterGameObject();
+        if (hovered != null)
+        {
+            target = ResolveUiFocusTarget(hovered) ?? hovered;
+            if (target != null)
+                return true;
+        }
+
+        hovered = GetUiRaycastGameObject();
+        if (hovered == null)
+            return false;
+
+        target = ResolveUiFocusTarget(hovered) ?? hovered;
+        return target != null;
     }
 
     private bool TryErasePaperworkMark(object target)

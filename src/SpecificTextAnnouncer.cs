@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 
 public class SpecificTextAnnouncer
 {
+    private const int FocusNullResetGraceMs = 500;
     private readonly ConditionalWeakTable<object, LastTextHolder> _lastByComponent = new();
     private string _lastMoneyNotifyText;
     private bool _moneyNotifyVisible;
@@ -37,11 +38,14 @@ public class SpecificTextAnnouncer
     private MethodInfo _findObjectsOfTypeAllMethod;
     private object _lastSelectedGameObject;
     private object _lastHoveredGameObject;
+    private int _lastSelectedSeenTick;
+    private int _lastHoveredSeenTick;
     private LampState _deskLampState;
     private string _lastSceneName;
     private string _lastAnnouncedChoiceText;
     private string _lastShopHoverText;
     private string _lastMouseHoverText;
+    private string _lastEmittedAnnouncementKey;
     private bool _promptReplayHandledInUpdate;
     private readonly Dictionary<string, object> _keyCodes = new(StringComparer.OrdinalIgnoreCase);
 
@@ -104,7 +108,7 @@ public class SpecificTextAnnouncer
             AnnounceCurrentSelection();
         if (!suppressHover)
             AnnounceCurrentHover();
-        if (!suppressHover)
+        if (!suppressHover && !(UiNavigationHandler.Instance?.IsDialogUiActiveForAnnouncements ?? false))
             AnnounceMouseHover();
 
     }
@@ -1748,13 +1752,16 @@ public class SpecificTextAnnouncer
             return;
         }
 
-        var current = GetCurrentSelectedGameObject(currentEventSystem);
-        if (current == null)
+        var currentRaw = GetCurrentSelectedGameObject(currentEventSystem);
+        if (currentRaw == null)
         {
-            _lastSelectedGameObject = null;
+            if (Environment.TickCount - _lastSelectedSeenTick > FocusNullResetGraceMs)
+                _lastSelectedGameObject = null;
             return;
         }
 
+        var current = GetStableUiAnnouncementTarget(currentRaw) ?? currentRaw;
+        _lastSelectedSeenTick = Environment.TickCount;
         if (ReferenceEquals(current, _lastSelectedGameObject))
             return;
 
@@ -1770,6 +1777,9 @@ public class SpecificTextAnnouncer
             return;
 
         if (TryAnnounceBarHoverFromVirtualCursor())
+            return;
+
+        if (TryAnnounceConfirmChoice(current))
             return;
 
         if (TryAnnounceSpeechBubbleChoice(current))
@@ -1803,13 +1813,16 @@ public class SpecificTextAnnouncer
             return;
         }
 
-        var current = GetCurrentHoveredGameObject(currentEventSystem);
-        if (current == null)
+        var currentRaw = GetCurrentHoveredGameObject(currentEventSystem);
+        if (currentRaw == null)
         {
-            _lastHoveredGameObject = null;
+            if (Environment.TickCount - _lastHoveredSeenTick > FocusNullResetGraceMs)
+                _lastHoveredGameObject = null;
             return;
         }
 
+        var current = GetStableUiAnnouncementTarget(currentRaw) ?? currentRaw;
+        _lastHoveredSeenTick = Environment.TickCount;
         if (ReferenceEquals(current, _lastHoveredGameObject))
             return;
 
@@ -1827,6 +1840,9 @@ public class SpecificTextAnnouncer
         if (TryAnnounceBarHoverFromVirtualCursor())
             return;
 
+        if (TryAnnounceConfirmChoice(current))
+            return;
+
         if (TryAnnounceSpeechBubbleChoice(current))
             return;
 
@@ -1834,6 +1850,24 @@ public class SpecificTextAnnouncer
             return;
 
         AnnounceTextComponents(current, null, force: true);
+    }
+
+    private object GetStableUiAnnouncementTarget(object gameObject)
+    {
+        if (gameObject == null || _selectableType == null)
+            return gameObject;
+
+        var selectable = GetComponentInParent(gameObject, _selectableType);
+        if (selectable == null)
+            return gameObject;
+
+        if (ReflectionUtils.TryGetProperty(selectable.GetType(), selectable, "gameObject", out var selectableGameObject)
+            && selectableGameObject != null)
+        {
+            return selectableGameObject;
+        }
+
+        return selectable;
     }
 
     private void AnnounceMouseHover()
@@ -1852,6 +1886,9 @@ public class SpecificTextAnnouncer
             return;
 
         var hovered = GetCurrentHoveredGameObject(GetCurrentEventSystem());
+        if (TryAnnounceConfirmChoice(hovered))
+            return;
+
         if (TryAnnounceSpeechBubbleChoice(hovered))
             return;
 
@@ -1924,6 +1961,38 @@ public class SpecificTextAnnouncer
             return false;
 
         return TryAnnounceChoiceText(text);
+    }
+
+    private bool TryAnnounceConfirmChoice(object gameObject)
+    {
+        if (gameObject == null || _selectableType == null)
+            return false;
+
+        var selectable = GetComponentInParent(gameObject, _selectableType);
+        if (selectable == null || !IsSelectableComponentActive(selectable))
+            return false;
+
+        var confirmRoots = new[] { "FaxConfirm", "MarkConfirm", "BuyConfirm", "RestartConfirm", "EndDayConfirm", "ComicEndConfirm" };
+        foreach (var typeName in confirmRoots)
+        {
+            var instance = GetStaticInstance(typeName);
+            if (instance == null || !IsRootActive(instance))
+                continue;
+
+            if (!ReflectionUtils.TryGetProperty(instance.GetType(), instance, "gameObject", out var rootGameObject) || rootGameObject == null)
+                continue;
+
+            if (!ReferenceEquals(gameObject, rootGameObject) && !IsChildOf(gameObject, rootGameObject))
+                continue;
+
+            var text = GetFirstTextInChildren(selectable) ?? GetTextValue(selectable);
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            return TryAnnounceChoiceText(text);
+        }
+
+        return false;
     }
 
     private bool TryAnnounceSpeechBubbleChoice(object gameObject)
@@ -2018,7 +2087,12 @@ public class SpecificTextAnnouncer
     private object GetCurrentHoveredGameObject(object eventSystem)
     {
         if (eventSystem == null || _eventSystemType == null)
+        {
+            var navFallback = UiNavigationHandler.Instance;
+            if (navFallback != null && navFallback.TryGetHoveredUiTarget(out var uiHoverFallback))
+                return uiHoverFallback;
             return null;
+        }
 
         try
         {
@@ -2033,13 +2107,28 @@ public class SpecificTextAnnouncer
 
             var pointerData = method.Invoke(inputModule, new object[] { -1 });
             if (pointerData == null)
+            {
+                var navFallback = UiNavigationHandler.Instance;
+                if (navFallback != null && navFallback.TryGetHoveredUiTarget(out var uiHoverFallback))
+                    return uiHoverFallback;
                 return null;
+            }
 
             var hoverProp = pointerData.GetType().GetProperty("pointerEnter", BindingFlags.Instance | BindingFlags.Public);
-            return hoverProp?.GetValue(pointerData);
+            var hovered = hoverProp?.GetValue(pointerData);
+            if (hovered != null)
+                return hovered;
+
+            var nav = UiNavigationHandler.Instance;
+            if (nav != null && nav.TryGetHoveredUiTarget(out var uiHover))
+                return uiHover;
+            return null;
         }
         catch
         {
+            var nav = UiNavigationHandler.Instance;
+            if (nav != null && nav.TryGetHoveredUiTarget(out var uiHover))
+                return uiHover;
             return null;
         }
     }
@@ -2186,11 +2275,56 @@ public class SpecificTextAnnouncer
         if (root == null)
             return null;
 
-        var selectable = GetConfirmPreferredSelectable(root) ?? GetFirstSelectableComponent(root);
+        var selectable = GetFocusedConfirmSelectable(root)
+            ?? GetConfirmPreferredSelectable(root)
+            ?? GetFirstSelectableComponent(root);
         if (selectable == null)
             return null;
 
         return GetFirstTextInChildren(selectable) ?? GetTextValue(selectable);
+    }
+
+    private object GetFocusedConfirmSelectable(object root)
+    {
+        if (root == null || _selectableType == null)
+            return null;
+
+        if (!ReflectionUtils.TryGetProperty(root.GetType(), root, "gameObject", out var rootGameObject) || rootGameObject == null)
+            return null;
+
+        var eventSystem = GetCurrentEventSystem();
+        if (eventSystem != null)
+        {
+            var hovered = GetCurrentHoveredGameObject(eventSystem);
+            var hoveredSelectable = GetConfirmSelectableIfUnderRoot(hovered, rootGameObject);
+            if (hoveredSelectable != null)
+                return hoveredSelectable;
+
+            var selected = GetCurrentSelectedGameObject(eventSystem);
+            var selectedSelectable = GetConfirmSelectableIfUnderRoot(selected, rootGameObject);
+            if (selectedSelectable != null)
+                return selectedSelectable;
+        }
+
+        return null;
+    }
+
+    private object GetConfirmSelectableIfUnderRoot(object gameObject, object rootGameObject)
+    {
+        if (gameObject == null || rootGameObject == null)
+            return null;
+
+        if (!ReferenceEquals(gameObject, rootGameObject) && !IsChildOf(gameObject, rootGameObject))
+            return null;
+
+        var selectable = GetComponentInParent(gameObject, _selectableType);
+        if (!IsSelectableComponentActive(selectable))
+            return null;
+
+        if (!IsSelectableUsable(gameObject))
+            return null;
+
+        return selectable;
     }
 
     private string GetConfirmPromptText(object instance)
@@ -2788,11 +2922,56 @@ public class SpecificTextAnnouncer
         if (string.IsNullOrWhiteSpace(text) || _screenreader == null)
             return;
 
+        var key = BuildAnnouncementDedupKey(text);
+        if (!string.IsNullOrWhiteSpace(key)
+            && string.Equals(key, _lastEmittedAnnouncementKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastEmittedAnnouncementKey = key;
         _screenreader.SuppressHoverFor(500);
         if (priority)
             _screenreader.AnnouncePriority(text);
         else
             _screenreader.Announce(text);
+    }
+
+    private static string BuildAnnouncementDedupKey(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        var stripped = TextSanitizer.StripRichTextTags(text);
+        if (string.IsNullOrWhiteSpace(stripped))
+            return null;
+
+        var trimmed = stripped.Trim();
+        if (trimmed.Length == 0)
+            return null;
+
+        var builder = new System.Text.StringBuilder(trimmed.Length);
+        var lastWasSpace = false;
+        foreach (var ch in trimmed)
+        {
+            if (char.IsControl(ch))
+                continue;
+
+            if (char.IsWhiteSpace(ch))
+            {
+                if (lastWasSpace)
+                    continue;
+
+                builder.Append(' ');
+                lastWasSpace = true;
+                continue;
+            }
+
+            builder.Append(char.ToLowerInvariant(ch));
+            lastWasSpace = false;
+        }
+
+        return builder.ToString().Trim();
     }
 
     private string GetComponentOrParentName(object component)

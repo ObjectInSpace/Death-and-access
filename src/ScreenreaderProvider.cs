@@ -462,13 +462,53 @@ public class ScreenreaderProvider : IDisposable
 
     private bool ShouldSuppressRepeat(string text)
     {
-        if (!string.Equals(text, _lastAnnouncedText, StringComparison.Ordinal))
+        var normalized = NormalizeRepeatText(text);
+        var lastNormalized = NormalizeRepeatText(_lastAnnouncedText);
+        if (!string.Equals(normalized, lastNormalized, StringComparison.Ordinal))
         {
             UpdateLastAnnouncement(text);
             return false;
         }
 
         return true;
+    }
+
+    private static string NormalizeRepeatText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        var stripped = TextSanitizer.StripRichTextTags(text);
+        if (string.IsNullOrWhiteSpace(stripped))
+            return string.Empty;
+
+        var trimmed = stripped.Trim();
+        var buffer = new System.Text.StringBuilder(trimmed.Length);
+        var lastWasSpace = false;
+        foreach (var ch in trimmed)
+        {
+            if (char.IsControl(ch))
+                continue;
+
+            if (char.IsWhiteSpace(ch))
+            {
+                if (lastWasSpace)
+                    continue;
+                buffer.Append(' ');
+                lastWasSpace = true;
+            }
+            else if (char.IsLetterOrDigit(ch))
+            {
+                buffer.Append(char.ToLowerInvariant(ch));
+                lastWasSpace = false;
+            }
+            else
+            {
+                // Ignore punctuation/symbol noise for repeat suppression.
+            }
+        }
+
+        return buffer.ToString().Trim();
     }
 
     private void UpdateLastAnnouncement(string text)
