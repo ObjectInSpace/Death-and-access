@@ -49,6 +49,9 @@ public class SpecificTextAnnouncer
     private string _lastMouseHoverText;
     private string _lastEmittedAnnouncementKey;
     private bool _promptReplayHandledInUpdate;
+    private bool _liveDialogueListenerEnabled;
+    private string _lastLiveSubtitleText;
+    private string _lastLiveSpeakerBubbleText;
     private readonly Dictionary<string, object> _keyCodes = new(StringComparer.OrdinalIgnoreCase);
 
     public void Initialize(ScreenreaderProvider screenreader)
@@ -69,11 +72,18 @@ public class SpecificTextAnnouncer
         var sceneChanged = !string.Equals(sceneName, _lastSceneName, StringComparison.Ordinal);
         _lastSceneName = sceneName;
         if (sceneChanged)
+        {
             _lastAnnouncedChoiceText = null;
+            _lastLiveSubtitleText = null;
+            _lastLiveSpeakerBubbleText = null;
+            if (ShouldFlushReplayCueOnSceneEnter(sceneName))
+                _screenreader?.ClearReplayCue();
+        }
         _suppressMoneyNotifications = string.Equals(sceneName, "Elevator", StringComparison.OrdinalIgnoreCase);
         _promptReplayHandledInUpdate = false;
         if (!IsComicScene(sceneName))
             TryReplayDialogShortcut();
+        HandleLiveDialogueListeners();
 
         if (IsIntroOrComicScene(sceneName))
         {
@@ -212,6 +222,49 @@ public class SpecificTextAnnouncer
         _screenreader?.SuppressHoverFor(2000);
         if (_screenreader?.ReplayLastAnnouncement() == true)
             _promptReplayHandledInUpdate = true;
+    }
+
+    private void HandleLiveDialogueListeners()
+    {
+        if (IsLiveDialogueTogglePressed())
+        {
+            _liveDialogueListenerEnabled = !_liveDialogueListenerEnabled;
+            _lastLiveSubtitleText = null;
+            _lastLiveSpeakerBubbleText = null;
+        }
+
+        if (!_liveDialogueListenerEnabled)
+            return;
+
+        if (TryGetActiveDialoguePromptText(out var subtitleText))
+        {
+            var normalized = TextSanitizer.StripRichTextTags(subtitleText)?.Trim();
+            if (!string.IsNullOrWhiteSpace(normalized) &&
+                !string.Equals(_lastLiveSubtitleText, normalized, StringComparison.Ordinal))
+            {
+                _lastLiveSubtitleText = normalized;
+                _screenreader?.AnnouncePriority(normalized);
+            }
+        }
+        else
+        {
+            _lastLiveSubtitleText = null;
+        }
+
+        if (TryGetActiveSpeakerBubbleText(out var speakerBubbleText))
+        {
+            var normalized = TextSanitizer.StripRichTextTags(speakerBubbleText)?.Trim();
+            if (!string.IsNullOrWhiteSpace(normalized) &&
+                !string.Equals(_lastLiveSpeakerBubbleText, normalized, StringComparison.Ordinal))
+            {
+                _lastLiveSpeakerBubbleText = normalized;
+                _screenreader?.AnnouncePriority(normalized);
+            }
+        }
+        else
+        {
+            _lastLiveSpeakerBubbleText = null;
+        }
     }
 
     private bool TryGetActiveSpeakerBubbleText(out string text)
@@ -1574,6 +1627,14 @@ public class SpecificTextAnnouncer
         return GetKeyDown("BackQuote") || GetKeyDown("Backquote");
     }
 
+    private bool IsLiveDialogueTogglePressed()
+    {
+        if (!(GetKeyDown("BackQuote") || GetKeyDown("Backquote")))
+            return false;
+
+        return GetKey("LeftShift") || GetKey("RightShift");
+    }
+
     private bool GetKeyDown(string key)
     {
         if (_inputType == null || _keyCodeType == null || string.IsNullOrWhiteSpace(key))
@@ -1586,6 +1647,30 @@ public class SpecificTextAnnouncer
         try
         {
             var method = _inputType.GetMethod("GetKeyDown", BindingFlags.Public | BindingFlags.Static, null, new[] { _keyCodeType }, null);
+            if (method == null)
+                return false;
+
+            var result = method.Invoke(null, new[] { keyCode });
+            return result is bool pressed && pressed;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool GetKey(string key)
+    {
+        if (_inputType == null || _keyCodeType == null || string.IsNullOrWhiteSpace(key))
+            return false;
+
+        var keyCode = GetKeyCode(key);
+        if (keyCode == null)
+            return false;
+
+        try
+        {
+            var method = _inputType.GetMethod("GetKey", BindingFlags.Public | BindingFlags.Static, null, new[] { _keyCodeType }, null);
             if (method == null)
                 return false;
 
@@ -3701,6 +3786,17 @@ public class SpecificTextAnnouncer
             return false;
 
         return sceneName.IndexOf("Comic", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static bool ShouldFlushReplayCueOnSceneEnter(string sceneName)
+    {
+        if (string.IsNullOrWhiteSpace(sceneName))
+            return false;
+
+        return string.Equals(sceneName, "Desktop", StringComparison.OrdinalIgnoreCase)         // Office gameplay scene
+            || string.Equals(sceneName, "Office", StringComparison.OrdinalIgnoreCase)          // Bar / office flow scene
+            || string.Equals(sceneName, "Shop", StringComparison.OrdinalIgnoreCase)            // Mortimer's Emporium
+            || string.Equals(sceneName, "DressingRoom", StringComparison.OrdinalIgnoreCase);   // Dressing room
     }
 
     private static string FormatNumber(object value)

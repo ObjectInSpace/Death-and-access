@@ -303,6 +303,12 @@ public class ScreenreaderProvider : IDisposable
         return true;
     }
 
+    public void ClearReplayCue()
+    {
+        _lastAnnouncedText = null;
+        _lastAnnouncedTick = 0;
+    }
+
     public void SuppressHoverFor(int ms)
     {
         if (ms <= 0)
