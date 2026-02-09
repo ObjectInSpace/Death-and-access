@@ -110,7 +110,8 @@ public class SpecificTextAnnouncer
             AnnounceCurrentSelection();
         if (!suppressHover)
             AnnounceCurrentHover();
-        if (!suppressHover && !(UiNavigationHandler.Instance?.IsDialogUiActiveForAnnouncements ?? false))
+        if (!suppressHover
+            && !(UiNavigationHandler.Instance?.IsDialogUiActiveForAnnouncements ?? false))
             AnnounceMouseHover();
 
     }
@@ -1843,6 +1844,9 @@ public class SpecificTextAnnouncer
         if (TryAnnounceBarHoverFromVirtualCursor())
             return;
 
+        if (TryAnnounceMenuChoice(current))
+            return;
+
         if (TryAnnounceConfirmChoice(current))
             return;
 
@@ -1853,7 +1857,6 @@ public class SpecificTextAnnouncer
             return;
 
         AnnounceTextComponents(current, null, force: true);
-        AnnounceHoveredObjectName(current);
     }
 
     private void AnnounceHoveredObjectName(object hovered)
@@ -1904,6 +1907,9 @@ public class SpecificTextAnnouncer
         if (TryAnnounceBarHoverFromVirtualCursor())
             return;
 
+        if (TryAnnounceMenuChoice(current))
+            return;
+
         if (TryAnnounceConfirmChoice(current))
             return;
 
@@ -1950,6 +1956,9 @@ public class SpecificTextAnnouncer
             return;
 
         var hovered = GetCurrentHoveredGameObject(GetCurrentEventSystem());
+        if (TryAnnounceMenuChoice(hovered))
+            return;
+
         if (TryAnnounceConfirmChoice(hovered))
             return;
 
@@ -1961,6 +1970,9 @@ public class SpecificTextAnnouncer
 
         if (nav.TryGetMouseHoverText(out var text))
         {
+            if (nav.IsMenuUiActiveForAnnouncements)
+                return;
+
             if (string.Equals(_lastMouseHoverText, text, StringComparison.Ordinal))
                 return;
 
@@ -2025,6 +2037,80 @@ public class SpecificTextAnnouncer
             return false;
 
         return TryAnnounceChoiceText(text);
+    }
+
+    private bool TryAnnounceMenuChoice(object gameObject)
+    {
+        var nav = UiNavigationHandler.Instance;
+        if (nav == null || !nav.IsMenuUiActiveForAnnouncements)
+            return false;
+
+        if (gameObject == null || _selectableType == null)
+            return false;
+
+        var selectable = GetComponentInParent(gameObject, _selectableType);
+        if (selectable == null || !IsSelectableComponentActive(selectable))
+            return false;
+
+        var text = GetMenuSelectableAnnouncementText(selectable);
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        return TryAnnounceChoiceText(text);
+    }
+
+    private string GetMenuSelectableAnnouncementText(object selectable)
+    {
+        if (selectable == null)
+            return null;
+
+        var text = GetFirstTextInChildren(selectable) ?? GetTextValue(selectable);
+        if (IsUsableMenuAnnouncementText(text))
+            return text;
+
+        if (!ReflectionUtils.TryGetProperty(selectable.GetType(), selectable, "gameObject", out var gameObject) || gameObject == null)
+            return null;
+
+        if (!ReflectionUtils.TryGetProperty(gameObject.GetType(), gameObject, "transform", out var transform) || transform == null)
+            return null;
+
+        var current = transform;
+        for (var depth = 0; depth < 3; depth++)
+        {
+            if (!ReflectionUtils.TryGetProperty(current.GetType(), current, "parent", out var parent) || parent == null)
+                break;
+
+            current = parent;
+            if (!ReflectionUtils.TryGetProperty(current.GetType(), current, "gameObject", out var parentGameObject) || parentGameObject == null)
+                continue;
+
+            text = GetFirstTextInChildren(parentGameObject);
+            if (IsUsableMenuAnnouncementText(text))
+                return text;
+        }
+
+        return null;
+    }
+
+    private bool IsUsableMenuAnnouncementText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var normalized = TextSanitizer.StripRichTextTags(text)?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            return false;
+
+        if (normalized.IndexOf("shop item template", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+
+        if (IsPlaceholderValue(normalized))
+            return false;
+
+        if (IsLikelyValueText(normalized))
+            return false;
+
+        return true;
     }
 
     private bool TryAnnounceConfirmChoice(object gameObject)
@@ -2834,13 +2920,7 @@ public class SpecificTextAnnouncer
             return;
 
         if (text.IndexOf("shop item template", StringComparison.OrdinalIgnoreCase) >= 0)
-        {
-            var fallback = GetComponentOrParentName(component);
-            if (string.IsNullOrWhiteSpace(fallback))
-                return;
-
-            text = fallback;
-        }
+            return;
 
         if (IsElevatorSceneActive() && IsMoneyNotificationText(text) && !IsMoneyNotificationComponent(component))
             return;

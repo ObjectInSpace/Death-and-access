@@ -156,6 +156,7 @@ public sealed class UiNavigationHandler
     internal bool IsVirtualCursorActive => _virtualCursorActive;
     internal bool ShouldBypassVirtualMousePositionPatch => _readingRawMousePosition;
     internal bool IsDialogUiActiveForAnnouncements => IsDialogActive() || IsSpeechBubbleDialogActive();
+    internal bool IsMenuUiActiveForAnnouncements => IsMenuActive() && !IsOfficeActive();
 
     internal bool IsBarSceneActiveForAnnouncements => IsBarSceneActive();
 
@@ -7216,11 +7217,8 @@ public sealed class UiNavigationHandler
 
         var shopDescription = GetShopItemDescription(shopItem);
         var shopName = GetShopItemName(shopItem);
-        var name = SanitizeHoverText(GetGameObjectName(interactable));
         hoverText = SanitizeHoverText(hoverText);
         shopDescription = SanitizeHoverText(shopDescription);
-        if (string.IsNullOrWhiteSpace(shopName))
-            shopName = GetFriendlyInteractableName(interactable);
         if (string.IsNullOrWhiteSpace(shopName) && shopItem != null)
             shopName = GetShopDisplayNameFromInstance();
         if (string.IsNullOrWhiteSpace(shopName) && IsShopActive())
@@ -7257,7 +7255,6 @@ public sealed class UiNavigationHandler
                 hoverText = shopName;
             else
                 hoverText = $"{shopName}. {hoverText}";
-            name = null;
         }
 
         var shopPrice = GetShopItemPriceText(shopItem);
@@ -7279,7 +7276,7 @@ public sealed class UiNavigationHandler
         }
 
         if (string.IsNullOrWhiteSpace(hoverText))
-            hoverText = GetFriendlyInteractableName(interactable) ?? name;
+            return null;
 
         if (IsShopActive() && !string.IsNullOrWhiteSpace(hoverText) && LooksLikeValueText(hoverText))
         {
@@ -7287,12 +7284,6 @@ public sealed class UiNavigationHandler
                 hoverText = $"{shopName ?? shopDescription}";
             else
                 hoverText = null;
-        }
-
-        if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(hoverText)
-            && hoverText.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0)
-        {
-            hoverText = $"{name}. {hoverText}";
         }
 
         hoverText = StripLeadingMoneySentence(hoverText);
