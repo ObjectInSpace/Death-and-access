@@ -406,7 +406,8 @@ public sealed class UiNavigationHandler
                 }
                 else
                 {
-                    MoveUnifiedCursorByDirection(direction);
+                    if (!TryMoveConversationChoiceByOrder(direction))
+                        MoveUnifiedCursorByDirection(direction);
                 }
             }
 
@@ -3116,6 +3117,63 @@ public sealed class UiNavigationHandler
         SetUiSelected(best);
         _lastEventSelected = GetInteractableGameObject(best) ?? best;
         SetInteractableFocus(best);
+        TrySyncUnifiedCursorToSelectedUi();
+        return true;
+    }
+
+    private bool TryMoveConversationChoiceByOrder(NavigationDirection direction)
+    {
+        if ((!IsDialogActive() && !IsSpeechBubbleDialogActive()) || direction == NavigationDirection.None)
+            return false;
+
+        var list = GetDialogSelectables(requireScreen: true);
+        if (list.Count == 0)
+            list = GetDialogSelectables(requireScreen: false);
+        if (list.Count == 0)
+            return false;
+
+        var ordered = OrderTargetsByScreenPosition(list, requireOnScreen: true);
+        if (ordered.Count == 0)
+            ordered = OrderTargetsByScreenPosition(list, requireOnScreen: false);
+        if (ordered.Count == 0)
+            return false;
+
+        var current = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
+        if (current == null)
+            current = ResolveUiFocusTarget(_lastEventSelected) ?? _lastEventSelected;
+        if (current == null && TryGetHoveredUiTarget(out var hovered))
+            current = ResolveUiFocusTarget(hovered) ?? hovered;
+
+        var currentIndex = -1;
+        if (current != null)
+        {
+            for (var i = 0; i < ordered.Count; i++)
+            {
+                if (IsSameUiTarget(ordered[i], current))
+                {
+                    currentIndex = i;
+                    break;
+                }
+            }
+        }
+
+        var forward = direction == NavigationDirection.Down || direction == NavigationDirection.Right;
+        var nextIndex = currentIndex < 0
+            ? (forward ? 0 : ordered.Count - 1)
+            : (forward ? currentIndex + 1 : currentIndex - 1);
+
+        if (nextIndex < 0)
+            nextIndex = ordered.Count - 1;
+        else if (nextIndex >= ordered.Count)
+            nextIndex = 0;
+
+        var target = ordered[nextIndex];
+        if (target == null)
+            return false;
+
+        SetUiSelected(target);
+        _lastEventSelected = GetInteractableGameObject(target) ?? target;
+        SetInteractableFocus(target);
         TrySyncUnifiedCursorToSelectedUi();
         return true;
     }
