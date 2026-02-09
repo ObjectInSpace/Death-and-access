@@ -34,6 +34,8 @@ public class SpecificTextAnnouncer
     private Type _deskLampType;
     private Type _moneyNotificationType;
     private Type _resourcesType;
+    private Type _speechBubbleManagerType;
+    private Type _speechBubbleType;
     private MethodInfo _findObjectsOfTypeMethod;
     private MethodInfo _findObjectsOfTypeAllMethod;
     private object _lastSelectedGameObject;
@@ -138,6 +140,8 @@ public class SpecificTextAnnouncer
         _deskLampType ??= TypeResolver.Get("DeskLamp");
         _moneyNotificationType ??= TypeResolver.Get("MoneyNotification");
         _resourcesType ??= TypeResolver.Get("UnityEngine.Resources");
+        _speechBubbleManagerType ??= TypeResolver.Get("SpeechBubbleManager");
+        _speechBubbleType ??= TypeResolver.Get("SpeechBubble");
         _findObjectsOfTypeMethod ??= _unityObjectType?.GetMethod(
             "FindObjectsOfType",
             BindingFlags.Public | BindingFlags.Static,
@@ -188,6 +192,14 @@ public class SpecificTextAnnouncer
         if (!IsPromptShortcutPressed())
             return;
 
+        if (TryGetActiveSpeakerBubbleText(out var speakerBubbleText))
+        {
+            _screenreader?.SuppressHoverFor(2000);
+            _screenreader?.AnnouncePriorityReplay(speakerBubbleText);
+            _promptReplayHandledInUpdate = true;
+            return;
+        }
+
         if (TryGetActiveDialoguePromptText(out var promptText))
         {
             _screenreader?.SuppressHoverFor(2000);
@@ -199,6 +211,58 @@ public class SpecificTextAnnouncer
         _screenreader?.SuppressHoverFor(2000);
         if (_screenreader?.ReplayLastAnnouncement() == true)
             _promptReplayHandledInUpdate = true;
+    }
+
+    private bool TryGetActiveSpeakerBubbleText(out string text)
+    {
+        text = null;
+        if (_speechBubbleManagerType == null)
+            return false;
+
+        var manager = GetStaticInstance("SpeechBubbleManager");
+        if (manager == null)
+            return false;
+
+        object speakerBubble;
+        try
+        {
+            var method = _speechBubbleManagerType.GetMethod("GetSpeakerBubble", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            speakerBubble = method.Invoke(manager, null);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (speakerBubble == null)
+            return false;
+
+        text = GetSpeechBubbleText(speakerBubble);
+        return !string.IsNullOrWhiteSpace(text);
+    }
+
+    private string GetSpeechBubbleText(object bubble)
+    {
+        if (bubble == null)
+            return null;
+
+        var textObj = GetFieldValue(bubble, "TextSpeechBubble");
+        var text = GetTextValue(textObj);
+        if (!string.IsNullOrWhiteSpace(text))
+            return text.Trim();
+
+        if (ReflectionUtils.TryGetProperty(bubble.GetType(), bubble, "gameObject", out var bubbleGameObject)
+            && bubbleGameObject != null)
+        {
+            text = GetFirstTextInChildren(bubbleGameObject);
+            if (!string.IsNullOrWhiteSpace(text))
+                return text.Trim();
+        }
+
+        return null;
     }
 
     private bool TryGetActiveDialoguePromptText(out string prompt)

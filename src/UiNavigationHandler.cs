@@ -398,8 +398,15 @@ public sealed class UiNavigationHandler
             if (direction != NavigationDirection.None)
             {
                 _suppressMouseUiSyncFromKeyboard = true;
-                if (!TryMoveDialogCursorToNearestOption(direction))
+                if (confirmInstance != null)
+                {
+                    if (!TryMoveDialogCursorToNearestOption(direction))
+                        MoveUnifiedCursorByDirection(direction);
+                }
+                else
+                {
                     MoveUnifiedCursorByDirection(direction);
+                }
             }
 
             if (submitInteractPressed)
