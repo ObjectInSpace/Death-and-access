@@ -1400,9 +1400,6 @@ public sealed class UiNavigationHandler
 
     private int GetDialogNumberIndex()
     {
-        if (GetKeyDown("BackQuote") || GetKeyDown("Backquote"))
-            return 0;
-
         for (var i = 1; i <= 9; i++)
         {
             if (GetKeyDown("Alpha" + i))

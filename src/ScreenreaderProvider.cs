@@ -282,11 +282,25 @@ public class ScreenreaderProvider : IDisposable
 
     public void Announce(string text)
     {
-        AnnounceInternal(text, isPriority: false);
+        AnnounceInternal(text, isPriority: false, allowRepeat: false);
     }
     public void AnnouncePriority(string text)
     {
-        AnnounceInternal(text, isPriority: true);
+        AnnounceInternal(text, isPriority: true, allowRepeat: false);
+    }
+
+    public void AnnouncePriorityReplay(string text)
+    {
+        AnnounceInternal(text, isPriority: true, allowRepeat: true);
+    }
+
+    public bool ReplayLastAnnouncement()
+    {
+        if (string.IsNullOrWhiteSpace(_lastAnnouncedText))
+            return false;
+
+        AnnounceInternal(_lastAnnouncedText, isPriority: true, allowRepeat: true);
+        return true;
     }
 
     public void SuppressHoverFor(int ms)
@@ -304,7 +318,7 @@ public class ScreenreaderProvider : IDisposable
         return Environment.TickCount <= _suppressHoverUntilTick;
     }
 
-    private void AnnounceInternal(string text, bool isPriority)
+    private void AnnounceInternal(string text, bool isPriority, bool allowRepeat)
     {
         if (_disposed || !_enabled || string.IsNullOrWhiteSpace(text))
             return;
@@ -313,7 +327,7 @@ public class ScreenreaderProvider : IDisposable
         if (string.IsNullOrWhiteSpace(text))
             return;
 
-        if (ShouldSuppressRepeat(text))
+        if (!allowRepeat && ShouldSuppressRepeat(text))
             return;
 
         if (isPriority)
