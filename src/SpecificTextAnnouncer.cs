@@ -42,6 +42,7 @@ public class SpecificTextAnnouncer
     private string _lastAnnouncedChoiceText;
     private string _lastShopHoverText;
     private string _lastMouseHoverText;
+    private bool _promptReplayHandledInUpdate;
     private readonly Dictionary<string, object> _keyCodes = new(StringComparer.OrdinalIgnoreCase);
 
     public void Initialize(ScreenreaderProvider screenreader)
@@ -64,6 +65,7 @@ public class SpecificTextAnnouncer
         if (sceneChanged)
             _lastAnnouncedChoiceText = null;
         _suppressMoneyNotifications = string.Equals(sceneName, "Elevator", StringComparison.OrdinalIgnoreCase);
+        _promptReplayHandledInUpdate = false;
         if (!IsComicScene(sceneName))
             TryReplayDialogShortcut();
 
@@ -162,11 +164,7 @@ public class SpecificTextAnnouncer
 
             if (IsPromptShortcutPressed())
             {
-                if (_screenreader?.ReplayLastAnnouncement() == true)
-                {
-                    _screenreader?.SuppressHoverFor(2000);
-                }
-                else
+                if (!_promptReplayHandledInUpdate)
                 {
                     var replay = !string.IsNullOrWhiteSpace(prompt) ? prompt : state.LastDialogPrompt;
                     if (!string.IsNullOrWhiteSpace(replay))
@@ -186,8 +184,28 @@ public class SpecificTextAnnouncer
         if (!IsPromptShortcutPressed())
             return;
 
+        if (TryGetActiveDialoguePromptText(out var promptText))
+        {
+            _screenreader?.SuppressHoverFor(2000);
+            _screenreader?.AnnouncePriorityReplay(promptText);
+            _promptReplayHandledInUpdate = true;
+            return;
+        }
+
         _screenreader?.SuppressHoverFor(2000);
-        _screenreader?.ReplayLastAnnouncement();
+        if (_screenreader?.ReplayLastAnnouncement() == true)
+            _promptReplayHandledInUpdate = true;
+    }
+
+    private bool TryGetActiveDialoguePromptText(out string prompt)
+    {
+        prompt = null;
+        var dialogue = GetStaticInstance("DialogueScreen");
+        if (dialogue == null || !IsDialogueFocused(dialogue))
+            return false;
+
+        prompt = GetDialoguePromptText(dialogue);
+        return !string.IsNullOrWhiteSpace(prompt);
     }
 
     private void AnnounceHUD()
