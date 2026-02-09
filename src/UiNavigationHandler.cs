@@ -156,7 +156,7 @@ public sealed class UiNavigationHandler
     internal bool IsVirtualCursorActive => _virtualCursorActive;
     internal bool ShouldBypassVirtualMousePositionPatch => _readingRawMousePosition;
     internal bool IsDialogUiActiveForAnnouncements => IsDialogActive() || IsSpeechBubbleDialogActive();
-    internal bool IsMenuUiActiveForAnnouncements => IsMenuActive() && !IsOfficeActive();
+    internal bool IsMenuUiActiveForAnnouncements => IsMenuActive();
 
     internal bool IsBarSceneActiveForAnnouncements => IsBarSceneActive();
 
