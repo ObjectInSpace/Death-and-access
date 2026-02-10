@@ -1,5 +1,6 @@
 namespace Death_and_Access;
 
+using System;
 using System.Reflection;
 using HarmonyLib;
 
@@ -53,7 +54,7 @@ internal static class InputGetMouseButtonPatch
     private static bool Prefix(int button, ref bool __result)
     {
         var nav = UiNavigationHandler.Instance;
-        if (button != 0 || nav == null || !nav.IsVirtualCursorActive)
+        if (button != 0 || nav == null || !nav.IsVirtualCursorActive || nav.ShouldBypassVirtualMouseButtonPatch)
             return true;
 
         if (!VirtualMouseState.GetHeld())
@@ -76,7 +77,7 @@ internal static class InputGetMouseButtonDownPatch
     private static bool Prefix(int button, ref bool __result)
     {
         var nav = UiNavigationHandler.Instance;
-        if (button != 0 || nav == null || !nav.IsVirtualCursorActive)
+        if (button != 0 || nav == null || !nav.IsVirtualCursorActive || nav.ShouldBypassVirtualMouseButtonPatch)
             return true;
 
         if (!VirtualMouseState.GetDown())
@@ -99,7 +100,7 @@ internal static class InputGetMouseButtonUpPatch
     private static bool Prefix(int button, ref bool __result)
     {
         var nav = UiNavigationHandler.Instance;
-        if (button != 0 || nav == null || !nav.IsVirtualCursorActive)
+        if (button != 0 || nav == null || !nav.IsVirtualCursorActive || nav.ShouldBypassVirtualMouseButtonPatch)
             return true;
 
         if (!VirtualMouseState.GetUp())
@@ -107,5 +108,63 @@ internal static class InputGetMouseButtonUpPatch
 
         __result = true;
         return false;
+    }
+}
+
+[HarmonyPatch]
+internal static class InputGetAxisRawPatch
+{
+    private static MethodBase TargetMethod()
+    {
+        var inputType = TypeResolver.Get("UnityEngine.Input");
+        return inputType?.GetMethod("GetAxisRaw", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null);
+    }
+
+    private static bool Prefix(string axisName, ref float __result)
+    {
+        var nav = UiNavigationHandler.Instance;
+        if (nav == null || nav.ShouldBypassUiAxisSuppression || !nav.ShouldSuppressUiAxisNavigation)
+            return true;
+
+        if (!IsUiNavigationAxis(axisName))
+            return true;
+
+        __result = 0f;
+        return false;
+    }
+
+    private static bool IsUiNavigationAxis(string axisName)
+    {
+        return string.Equals(axisName, "Horizontal", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(axisName, "Vertical", StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+[HarmonyPatch]
+internal static class InputGetAxisPatch
+{
+    private static MethodBase TargetMethod()
+    {
+        var inputType = TypeResolver.Get("UnityEngine.Input");
+        return inputType?.GetMethod("GetAxis", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null);
+    }
+
+    private static bool Prefix(string axisName, ref float __result)
+    {
+        var nav = UiNavigationHandler.Instance;
+        if (nav == null || nav.ShouldBypassUiAxisSuppression || !nav.ShouldSuppressUiAxisNavigation)
+            return true;
+
+        if (!IsUiNavigationAxis(axisName))
+            return true;
+
+        __result = 0f;
+        return false;
+    }
+
+    private static bool IsUiNavigationAxis(string axisName)
+    {
+        return string.Equals(axisName, "Horizontal", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(axisName, "Vertical", StringComparison.OrdinalIgnoreCase);
     }
 }

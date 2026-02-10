@@ -188,6 +188,8 @@ public class ScreenreaderProvider : IDisposable
     private bool _unity2022OrNewer;
     private string _lastAnnouncedText;
     private int _lastAnnouncedTick;
+    private string _lastAnnouncedSourceKey;
+    private string _lastAnnouncedSourceNormalizedText;
     private const int MaxQueueLength = 100;
     private int _suppressHoverUntilTick;
     private bool _disposed;
@@ -289,6 +291,11 @@ public class ScreenreaderProvider : IDisposable
         AnnounceInternal(text, isPriority: true, allowRepeat: false);
     }
 
+    public void AnnouncePriorityWithSource(string text, string sourceKey)
+    {
+        AnnounceInternalWithSource(text, sourceKey, isPriority: true, allowRepeat: false);
+    }
+
     public void AnnouncePriorityReplay(string text)
     {
         AnnounceInternal(text, isPriority: true, allowRepeat: true);
@@ -307,6 +314,8 @@ public class ScreenreaderProvider : IDisposable
     {
         _lastAnnouncedText = null;
         _lastAnnouncedTick = 0;
+        _lastAnnouncedSourceKey = null;
+        _lastAnnouncedSourceNormalizedText = null;
     }
 
     public void SuppressHoverFor(int ms)
@@ -366,6 +375,48 @@ public class ScreenreaderProvider : IDisposable
         ProcessQueue();
     }
 
+    private void AnnounceInternalWithSource(string text, string sourceKey, bool isPriority, bool allowRepeat)
+    {
+        if (_disposed || !_enabled || string.IsNullOrWhiteSpace(text))
+            return;
+
+        text = TextSanitizer.StripRichTextTags(text);
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        if (!allowRepeat && ShouldSuppressRepeatForSource(text, sourceKey))
+            return;
+
+        if (isPriority)
+        {
+            UpdateLastAnnouncement(text);
+            SuppressHoverFor(750);
+        }
+
+        UpdateExternalScreenreaderStatus();
+        if (TrySpeakViaExternalScreenreader(text, isPriority: isPriority, allowUia: _externalScreenreaderActive))
+        {
+            if (isPriority)
+            {
+                ClearQueueAndResetSpeaking();
+            }
+            return;
+        }
+
+        if (isPriority && _isSpeaking)
+        {
+            TryCancelAllSpeech();
+        }
+
+        if (isPriority)
+        {
+            _announcementQueue.Clear();
+        }
+
+        EnqueueAnnouncement(text);
+        ProcessQueue();
+    }
+
     private void ProcessQueue()
     {
         if (_disposed)
@@ -382,12 +433,13 @@ public class ScreenreaderProvider : IDisposable
             while (_announcementQueue.Count > 0 && _enabled)
             {
                 var text = _announcementQueue.Dequeue();
-                if (!TrySpeakViaExternalScreenreader(text, isPriority: false, allowUia: _externalScreenreaderActive))
+                var spokeExternal = TrySpeakViaExternalScreenreader(text, isPriority: false, allowUia: _externalScreenreaderActive);
+                if (!spokeExternal)
                 {
                     SpeakViaPowerShell(text);
                 }
                 UpdateExternalScreenreaderStatus();
-                if (_externalScreenreaderActive)
+                if (spokeExternal && _externalScreenreaderActive)
                 {
                     ClearQueueAndResetSpeaking();
                     break;
@@ -477,6 +529,22 @@ public class ScreenreaderProvider : IDisposable
         }
 
         return true;
+    }
+
+    private bool ShouldSuppressRepeatForSource(string text, string sourceKey)
+    {
+        var normalized = NormalizeRepeatText(text);
+        var normalizedSource = string.IsNullOrWhiteSpace(sourceKey) ? string.Empty : sourceKey.Trim();
+        if (string.Equals(normalized, _lastAnnouncedSourceNormalizedText, StringComparison.Ordinal)
+            && string.Equals(normalizedSource, _lastAnnouncedSourceKey, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        _lastAnnouncedSourceNormalizedText = normalized;
+        _lastAnnouncedSourceKey = normalizedSource;
+        UpdateLastAnnouncement(text);
+        return false;
     }
 
     private static string NormalizeRepeatText(string text)

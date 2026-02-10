@@ -135,11 +135,13 @@ public sealed class UiNavigationHandler
     private bool _keyboardFocusActive;
     private bool _virtualCursorActive;
     private bool _readingRawMousePosition;
+    private bool _readingRawAxes;
     private (float x, float y) _virtualCursorPos;
     private bool _virtualCursorMovedSinceLastSubmit;
     private string _lastHoverAnnouncementSignature;
     private bool _suppressMouseUiSyncFromKeyboard;
     private string _lastFocusedTargetKey;
+    private object _lastSnappedWorldInteractable;
     private string _activeSceneName;
     private string _elevatorSceneName;
     private readonly HashSet<string> _allowedSceneNames = new(StringComparer.OrdinalIgnoreCase);
@@ -147,6 +149,8 @@ public sealed class UiNavigationHandler
     private bool _lastPauseOverlayActive;
     private int _suppressSubmitUntilTick;
     private const int PauseOverlaySubmitSuppressMs = 300;
+    private const int UiDirectionalMoveDebounceMs = 90;
+    private static int s_lastUiDirectionalMoveTick;
 
     public void Initialize(ScreenreaderProvider screenreader)
     {
@@ -158,8 +162,11 @@ public sealed class UiNavigationHandler
 
     internal bool IsVirtualCursorActive => _virtualCursorActive;
     internal bool ShouldBypassVirtualMousePositionPatch => _readingRawMousePosition;
+    internal bool ShouldBypassVirtualMouseButtonPatch => ShouldUseUnifiedWorldDirectionalNavigation();
     internal bool IsDialogUiActiveForAnnouncements => IsDialogActive() || IsSpeechBubbleDialogActive();
     internal bool IsMenuUiActiveForAnnouncements => IsMenuActive();
+    internal bool ShouldSuppressUiAxisNavigation => !IsGrimsOfficeSceneActive();
+    internal bool ShouldBypassUiAxisSuppression => _readingRawAxes;
 
     internal bool IsBarSceneActiveForAnnouncements => IsBarSceneActive();
 
@@ -174,8 +181,7 @@ public sealed class UiNavigationHandler
         if (!TryGetVirtualCursorPosition(out var x, out var y))
             return false;
 
-        text = GetSceneObjectNameAtScreenPosition2D(x, y);
-        return !string.IsNullOrWhiteSpace(text);
+        return TryGetBarHoverNameAtScreenPosition(x, y, out text);
     }
 
     internal bool TryGetBarHoverNameFromMouse(out string text)
@@ -189,7 +195,15 @@ public sealed class UiNavigationHandler
         var lastHit = GetInputManagerLastHit();
         if (lastHit != null)
         {
-            var go = GetInteractableGameObject(lastHit) ?? GetMemberValue(lastHit, "gameObject");
+            var resolved = ResolveInteractableForFocus(lastHit) ?? lastHit;
+            var hover = SanitizeHoverText(GetHoverText(resolved));
+            if (!string.IsNullOrWhiteSpace(hover))
+            {
+                text = hover;
+                return true;
+            }
+
+            var go = GetInteractableGameObject(resolved) ?? GetMemberValue(resolved, "gameObject");
             var name = GetMemberValue(go, "name")?.ToString();
             var sanitized = SanitizeSceneObjectName(name);
             if (!string.IsNullOrWhiteSpace(sanitized))
@@ -203,8 +217,39 @@ public sealed class UiNavigationHandler
         if (raw == null)
             return false;
 
-        text = GetSceneObjectNameAtScreenPosition2D(raw.Value.x, raw.Value.y);
-        return !string.IsNullOrWhiteSpace(text);
+        return TryGetBarHoverNameAtScreenPosition(raw.Value.x, raw.Value.y, out text);
+    }
+
+    private bool TryGetBarHoverNameAtScreenPosition(float x, float y, out string text)
+    {
+        text = null;
+
+        var interactable = GetInteractableAtScreenPosition(x, y);
+        if (interactable != null)
+        {
+            var resolved = ResolveInteractableForFocus(interactable) ?? interactable;
+
+            var hover = SanitizeHoverText(GetHoverText(resolved));
+            if (!string.IsNullOrWhiteSpace(hover))
+            {
+                text = hover;
+                return true;
+            }
+
+            var go = GetInteractableGameObject(resolved) ?? GetMemberValue(resolved, "gameObject");
+            var name = SanitizeSceneObjectName(GetMemberValue(go, "name")?.ToString());
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                text = name;
+                return true;
+            }
+        }
+
+        text = GetSceneObjectNameAtScreenPosition2D(x, y);
+        if (!string.IsNullOrWhiteSpace(text))
+            return true;
+
+        return false;
     }
 
 
@@ -255,7 +300,38 @@ public sealed class UiNavigationHandler
         }
 
         if (interactable == null)
+        {
+            var hudHover = SanitizeHoverText(GetHudHoverText());
+            hudHover = StripLeadingMoneySentence(hudHover);
+            if (!string.IsNullOrWhiteSpace(hudHover) && !LooksLikeValueText(hudHover))
+            {
+                text = hudHover;
+                return true;
+            }
+
+            if (IsShopActive())
+            {
+                var shopHud = SanitizeHoverText(GetHudHoverShopText());
+                shopHud = StripLeadingMoneySentence(shopHud);
+                if (!string.IsNullOrWhiteSpace(shopHud) && !LooksLikeValueText(shopHud))
+                {
+                    text = shopHud;
+                    return true;
+                }
+            }
+
             return false;
+        }
+
+        if (IsDressingRoomActive())
+        {
+            var dressing = GetDressingRoomInteractableLabel(interactable);
+            if (!string.IsNullOrWhiteSpace(dressing))
+            {
+                text = dressing;
+                return true;
+            }
+        }
 
         var hoverText = GetHoverText(interactable);
         if (string.IsNullOrWhiteSpace(hoverText))
@@ -267,6 +343,49 @@ public sealed class UiNavigationHandler
 
         text = BuildHoverText(interactable, hoverText);
         return !string.IsNullOrWhiteSpace(text);
+    }
+
+    internal bool TryGetMouseHoverSignature(out string signature)
+    {
+        signature = null;
+        EnsureTypes();
+
+        object interactable = GetInputManagerLastHit();
+        if (interactable == null)
+        {
+            var pointer = GetMousePosition();
+            if (pointer == null)
+                return false;
+
+            interactable = GetInteractableAtScreenPosition(pointer.Value.x, pointer.Value.y);
+        }
+
+        if (interactable == null && IsShopActive())
+        {
+            var pointer = GetMousePosition();
+            if (pointer != null)
+                interactable = GetShopItemAtScreenPosition(pointer.Value.x, pointer.Value.y);
+        }
+
+        if (interactable == null)
+            return false;
+
+        var resolved = ResolveInteractableForFocus(interactable) ?? interactable;
+        var gameObject = GetInteractableGameObject(resolved) ?? GetGameObjectFromComponent(resolved) ?? resolved;
+        if (gameObject == null)
+            return false;
+
+        var key = GetHierarchyOrderKey(gameObject);
+        if (string.IsNullOrWhiteSpace(key))
+            key = GetGameObjectName(gameObject);
+        if (string.IsNullOrWhiteSpace(key))
+            key = resolved.GetType().FullName;
+
+        if (string.IsNullOrWhiteSpace(key))
+            return false;
+
+        signature = key;
+        return true;
     }
 
     private bool IsBarSceneActive()
@@ -402,14 +521,19 @@ public sealed class UiNavigationHandler
         if (TryAdjustFocusedSlider(direction))
             return;
 
-        if (IsMenuActive() && !IsOfficeActive())
+        if (IsMenuActive())
         {
-            SyncUnifiedCursorForUi(preferKeyboardSelection: false);
-            if (direction != NavigationDirection.None)
+            var menuDirection = GetMenuDirection();
+            var keyboardNavigating = menuDirection != NavigationDirection.None
+                || (_keyboardFocusActive && Environment.TickCount <= _keyboardFocusUntilTick);
+            SyncUnifiedCursorForUi(preferKeyboardSelection: keyboardNavigating);
+            if (menuDirection != NavigationDirection.None)
             {
+                if (!TryAcquireUiDirectionalMoveSlot())
+                    return;
+
                 _suppressMouseUiSyncFromKeyboard = true;
-                if (!TryMoveMenuCursorToNearestOption(direction))
-                    MoveUnifiedCursorByDirection(direction);
+                TryMoveUiByUnifiedDirection(menuDirection, confirmInstance: null);
             }
             if (submitInteractPressed)
                 SubmitInteractable();
@@ -422,20 +546,17 @@ public sealed class UiNavigationHandler
             if (confirmInstance != null)
                 SyncConfirmDialogSelection(confirmInstance);
 
-            SyncUnifiedCursorForUi(preferKeyboardSelection: false);
-            if (direction != NavigationDirection.None)
+            var dialogDirection = GetUiArrowDirection();
+            var keyboardNavigating = dialogDirection != NavigationDirection.None
+                || (_keyboardFocusActive && Environment.TickCount <= _keyboardFocusUntilTick);
+            SyncUnifiedCursorForUi(preferKeyboardSelection: keyboardNavigating);
+            if (dialogDirection != NavigationDirection.None)
             {
+                if (!TryAcquireUiDirectionalMoveSlot())
+                    return;
+
                 _suppressMouseUiSyncFromKeyboard = true;
-                if (confirmInstance != null)
-                {
-                    if (!TryMoveDialogCursorToNearestOption(direction))
-                        MoveUnifiedCursorByDirection(direction);
-                }
-                else
-                {
-                    if (!TryMoveConversationChoiceByOrder(direction))
-                        MoveUnifiedCursorByDirection(direction);
-                }
+                TryMoveUiByUnifiedDirection(dialogDirection, confirmInstance);
             }
 
             if (submitInteractPressed)
@@ -449,8 +570,17 @@ public sealed class UiNavigationHandler
             return;
         }
 
+        var worldDirection = direction != NavigationDirection.None ? direction : GetUiArrowDirection();
+        if (ShouldUseUnifiedWorldDirectionalNavigation() && worldDirection != NavigationDirection.None)
+        {
+            _suppressMouseUiSyncFromKeyboard = true;
+            if (!TryMoveWorldCursorToNearestInteractable(worldDirection))
+                MoveUnifiedCursorByDirection(worldDirection);
+            return;
+        }
+
         if (direction != NavigationDirection.None
-            && !IsOfficeActive()
+            && !IsGrimsOfficeSceneActive()
             && !IsDressingRoomActive()
             && !_virtualCursorActive
             && ShouldDeferToEventSystem()
@@ -463,6 +593,582 @@ public sealed class UiNavigationHandler
         }
 
         UpdateVirtualCursorFocus(direction, submitInteractPressed, axisX, axisY);
+    }
+
+    private bool TryAcquireUiDirectionalMoveSlot()
+    {
+        var now = Environment.TickCount;
+        var last = s_lastUiDirectionalMoveTick;
+        if (last != 0 && now > last && (now - last) < UiDirectionalMoveDebounceMs)
+            return false;
+
+        s_lastUiDirectionalMoveTick = now;
+        return true;
+    }
+
+    private void TryMoveUiByUnifiedDirection(NavigationDirection direction, object confirmInstance)
+    {
+        if (direction == NavigationDirection.None)
+            return;
+
+        var moved = false;
+        if (IsMenuActive())
+        {
+            moved = TryMoveMenuCursorToNearestOption(direction);
+        }
+        else if (IsDialogActive() || IsSpeechBubbleDialogActive())
+        {
+            if (confirmInstance != null)
+            {
+                moved = TryMoveDialogCursorToNearestOption(direction);
+            }
+            else
+            {
+                moved = TryMoveConversationChoiceByOrder(direction);
+            }
+        }
+
+        if (!moved && !(IsMenuActive() || IsDialogActive() || IsSpeechBubbleDialogActive()))
+            MoveUnifiedCursorByDirection(direction);
+    }
+
+    private bool ShouldUseUnifiedWorldDirectionalNavigation()
+    {
+        if (IsGrimsOfficeSceneActive())
+            return false;
+
+        if (IsComicSceneActive())
+            return false;
+
+        if (IsMenuActive() || IsDialogActive() || IsSpeechBubbleDialogActive())
+            return false;
+
+        return true;
+    }
+
+    private bool TryMoveWorldCursorToNearestInteractable(NavigationDirection direction)
+    {
+        if (direction == NavigationDirection.None || !ShouldUseUnifiedWorldDirectionalNavigation())
+            return false;
+
+        var targets = IsElevatorActive()
+            ? GetEnabledElevatorButtons()
+            : IsDressingRoomActive()
+                ? GetDressingRoomDirectionalTargets()
+                : GetWorldInteractableTargets();
+        if (targets.Count == 0)
+            targets = GetSceneNumberRowTargets();
+        if (targets.Count == 0)
+            return false;
+
+        var candidates = new List<object>(targets.Count);
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+        foreach (var target in targets)
+        {
+            var resolved = ResolveInteractableForFocus(target) ?? target;
+            if (resolved == null)
+                continue;
+            if (!IsInteractableActive(resolved))
+                continue;
+            var pos = GetDirectionalTargetScreenPosition(resolved);
+            if (pos == null)
+                continue;
+            if (width > 0 && height > 0
+                && (pos.Value.x < 0 || pos.Value.x > width || pos.Value.y < 0 || pos.Value.y > height))
+                continue;
+
+            var duplicate = false;
+            foreach (var existing in candidates)
+            {
+                if (IsSameWorldTarget(existing, resolved))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+                candidates.Add(resolved);
+        }
+
+        if (candidates.Count == 0)
+            return false;
+
+        (float x, float y)? origin = null;
+        var focused = ResolveInteractableForFocus(_lastFocusedInteractable);
+        if (focused != null)
+            origin = GetInteractableScreenPosition(focused);
+
+        if (origin == null && _virtualCursorActive)
+            origin = _virtualCursorPos;
+
+        if (origin == null)
+            origin = GetMousePosition();
+
+        if (origin == null)
+            return false;
+
+        const float epsilon = 0.01f;
+        object best = null;
+        var bestScore = float.PositiveInfinity;
+        string bestOrderKey = null;
+
+        foreach (var target in candidates)
+        {
+            if (target == null)
+                continue;
+
+            var pos = GetDirectionalTargetScreenPosition(target);
+            if (pos == null)
+                continue;
+
+            var dx = pos.Value.x - origin.Value.x;
+            var dy = pos.Value.y - origin.Value.y;
+            var inDirection = direction switch
+            {
+                NavigationDirection.Left => dx < -epsilon,
+                NavigationDirection.Right => dx > epsilon,
+                NavigationDirection.Up => dy > epsilon,
+                NavigationDirection.Down => dy < -epsilon,
+                _ => false
+            };
+
+            if (!inDirection)
+                continue;
+
+            var score = (dx * dx) + (dy * dy);
+            if (score < bestScore - epsilon)
+            {
+                bestScore = score;
+                best = target;
+                bestOrderKey = GetDirectionalTargetOrderKey(target);
+                continue;
+            }
+
+            if (Math.Abs(score - bestScore) <= epsilon)
+            {
+                var candidateKey = GetDirectionalTargetOrderKey(target);
+                if (string.Compare(candidateKey, bestOrderKey, StringComparison.Ordinal) < 0)
+                {
+                    best = target;
+                    bestOrderKey = candidateKey;
+                }
+            }
+        }
+
+        if (best == null)
+        {
+            // Wrap-around fallback for world interactions, same principle as dialogs.
+            object wrapBest = null;
+            var wrapAxis = 0f;
+            var wrapDist = float.PositiveInfinity;
+            var hasWrap = false;
+
+            foreach (var target in candidates)
+            {
+                if (target == null)
+                    continue;
+
+                var pos = GetDirectionalTargetScreenPosition(target);
+                if (pos == null)
+                    continue;
+
+                var dx = pos.Value.x - origin.Value.x;
+                var dy = pos.Value.y - origin.Value.y;
+                var score = (dx * dx) + (dy * dy);
+
+                var axisValue = direction switch
+                {
+                    NavigationDirection.Left => pos.Value.x,
+                    NavigationDirection.Right => pos.Value.x,
+                    NavigationDirection.Up => pos.Value.y,
+                    NavigationDirection.Down => pos.Value.y,
+                    _ => 0f
+                };
+
+                if (!hasWrap)
+                {
+                    hasWrap = true;
+                    wrapBest = target;
+                    wrapAxis = axisValue;
+                    wrapDist = score;
+                    continue;
+                }
+
+                var betterAxis = direction switch
+                {
+                    NavigationDirection.Left => axisValue > wrapAxis + epsilon,
+                    NavigationDirection.Right => axisValue < wrapAxis - epsilon,
+                    NavigationDirection.Up => axisValue < wrapAxis - epsilon,
+                    NavigationDirection.Down => axisValue > wrapAxis + epsilon,
+                    _ => false
+                };
+
+                if (betterAxis)
+                {
+                    wrapBest = target;
+                    wrapAxis = axisValue;
+                    wrapDist = score;
+                    continue;
+                }
+
+                if (Math.Abs(axisValue - wrapAxis) <= epsilon)
+                {
+                    if (score < wrapDist - epsilon)
+                    {
+                        wrapBest = target;
+                        wrapDist = score;
+                        continue;
+                    }
+
+                    if (Math.Abs(score - wrapDist) <= epsilon)
+                    {
+                        var candidateKey = GetDirectionalTargetOrderKey(target);
+                        var wrapKey = GetDirectionalTargetOrderKey(wrapBest);
+                        if (string.Compare(candidateKey, wrapKey, StringComparison.Ordinal) < 0)
+                        {
+                            wrapBest = target;
+                        }
+                    }
+                }
+            }
+
+            best = wrapBest;
+        }
+
+        if (best == null)
+            return false;
+
+        if (!TryMoveCursorToInteractable(best))
+            return false;
+
+        var now = Environment.TickCount;
+        _keyboardNavUntilTick = now + 500;
+        _keyboardFocusUntilTick = now + 1500;
+        _keyboardFocusActive = true;
+        _virtualCursorMovedSinceLastSubmit = false;
+
+        if (_selectableType != null && GetComponentByType(best, _selectableType) != null)
+            _lastEventSelected = GetInteractableGameObject(best) ?? best;
+
+        _lastSnappedWorldInteractable = best;
+        SetInteractableFocus(best);
+        return true;
+    }
+
+    private List<object> GetDressingRoomDirectionalTargets()
+    {
+        var targets = new List<object>();
+
+        if (_mirrorType != null)
+        {
+            var mirror = GetStaticInstance(_mirrorType);
+            if (mirror != null && IsInteractableActive(mirror))
+                targets.Add(mirror);
+        }
+
+        if (_mirrorNavigationButtonType != null)
+        {
+            foreach (var button in FindSceneObjectsOfType(_mirrorNavigationButtonType))
+            {
+                if (button == null || !IsInteractableActive(button))
+                    continue;
+
+                var duplicate = false;
+                foreach (var existing in targets)
+                {
+                    if (IsSameWorldTarget(existing, button))
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                }
+
+                if (!duplicate)
+                    targets.Add(button);
+            }
+        }
+
+        if (targets.Count > 0)
+            return targets;
+
+        return GetWorldInteractableTargets();
+    }
+
+    private bool IsSameWorldTarget(object left, object right)
+    {
+        if (left == null || right == null)
+            return false;
+
+        if (ReferenceEquals(left, right))
+            return true;
+
+        var leftGo = GetInteractableGameObject(left) ?? GetGameObjectFromComponent(left) ?? GetMemberValue(left, "gameObject");
+        var rightGo = GetInteractableGameObject(right) ?? GetGameObjectFromComponent(right) ?? GetMemberValue(right, "gameObject");
+        if (leftGo == null || rightGo == null)
+            return false;
+
+        return ReferenceEquals(leftGo, rightGo);
+    }
+
+    private List<object> GetWorldInteractableTargets()
+    {
+        var targets = new List<object>();
+        if (_interactableType == null || _componentType == null)
+            return targets;
+
+        foreach (var component in FindSceneObjectsOfType(_componentType))
+        {
+            if (component == null)
+                continue;
+
+            var componentType = component.GetType();
+            if (!_interactableType.IsAssignableFrom(componentType))
+                continue;
+
+            var interactable = component;
+            var resolved = ResolveInteractableForFocus(interactable) ?? interactable;
+            if (resolved == null || !IsInteractableActive(resolved))
+                continue;
+
+            var duplicate = false;
+            foreach (var existing in targets)
+            {
+                if (IsSameUiTarget(existing, resolved))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+                targets.Add(resolved);
+        }
+
+        return targets;
+    }
+
+    private List<object> GetEnabledElevatorButtons()
+    {
+        var buttons = new List<object>();
+        if (_elevatorButtonType == null)
+            return buttons;
+
+        foreach (var button in FindSceneObjectsOfType(_elevatorButtonType))
+        {
+            if (button == null || !IsInteractableActive(button))
+                continue;
+
+            if (!IsWorldSubmitCandidate(button))
+                continue;
+
+            var duplicate = false;
+            foreach (var existing in buttons)
+            {
+                if (IsSameUiTarget(existing, button))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+                buttons.Add(button);
+        }
+
+        return buttons;
+    }
+
+    private string GetDirectionalTargetOrderKey(object target)
+    {
+        if (target == null)
+            return "zzzz";
+
+        var gameObject = GetInteractableGameObject(target) ?? GetGameObjectFromComponent(target) ?? GetMemberValue(target, "gameObject");
+        if (gameObject != null)
+        {
+            var hierarchyKey = GetHierarchyOrderKey(gameObject);
+            if (!string.IsNullOrWhiteSpace(hierarchyKey))
+                return hierarchyKey;
+
+            var name = GetGameObjectName(gameObject);
+            if (!string.IsNullOrWhiteSpace(name))
+                return name;
+        }
+
+        return target.GetType().FullName ?? "zzzz";
+    }
+
+    private List<object> GetWorldDirectionalTargets(bool requireScreen)
+    {
+        var targets = new List<object>();
+        var width = GetScreenDimension("width");
+        var height = GetScreenDimension("height");
+
+        // Match game InputManager behavior: start from 2D colliders and resolve
+        // Interactable on parent.
+        if (_collider2DType != null)
+        {
+            foreach (var collider in FindSceneObjectsOfType(_collider2DType))
+            {
+                if (collider == null)
+                    continue;
+
+                var colliderGo = GetGameObjectFromComponent(collider) ?? GetMemberValue(collider, "gameObject");
+                if (colliderGo == null || !IsGameObjectActive(colliderGo))
+                    continue;
+
+                var interactable = GetComponentInParentExact(colliderGo, _interactableType);
+                if (interactable == null || !IsInteractableActive(interactable))
+                    continue;
+
+                TryAddDirectionalTarget(targets, interactable, width, height, requireScreen);
+            }
+        }
+
+        if (_collider3DType != null)
+        {
+            foreach (var collider in FindSceneObjectsOfType(_collider3DType))
+            {
+                if (collider == null)
+                    continue;
+
+                var colliderGo = GetGameObjectFromComponent(collider) ?? GetMemberValue(collider, "gameObject");
+                if (colliderGo == null || !IsGameObjectActive(colliderGo))
+                    continue;
+
+                var interactable = GetComponentInParentExact(colliderGo, _interactableType);
+                if (interactable == null || !IsInteractableActive(interactable))
+                    continue;
+
+                TryAddDirectionalTarget(targets, interactable, width, height, requireScreen);
+            }
+        }
+
+        // Reuse the scene target collector already used by number-row shortcuts.
+        var sceneTargets = GetSceneNumberRowTargets();
+        foreach (var target in sceneTargets)
+            TryAddDirectionalTarget(targets, target, width, height, requireScreen);
+
+        var selectables = GetEligibleSelectables(requireScreen);
+        foreach (var selectable in selectables)
+            TryAddDirectionalTarget(targets, selectable, width, height, requireScreen);
+
+        if (_interactableType != null)
+        {
+            foreach (var interactable in FindSceneObjectsOfType(_interactableType))
+            {
+                if (interactable == null)
+                    continue;
+                if (!IsInteractableActive(interactable))
+                    continue;
+
+                TryAddDirectionalTarget(targets, interactable, width, height, requireScreen);
+            }
+        }
+
+        return targets;
+    }
+
+    private void TryAddDirectionalTarget(List<object> targets, object candidate, int width, int height, bool requireScreen)
+    {
+        if (targets == null || candidate == null)
+            return;
+
+        var resolved = ResolveInteractableForFocus(candidate) ?? candidate;
+        var pos = GetDirectionalTargetScreenPosition(resolved);
+        if (pos == null)
+            return;
+
+        if (requireScreen && width > 0 && height > 0)
+        {
+            if (pos.Value.x < 0 || pos.Value.x > width || pos.Value.y < 0 || pos.Value.y > height)
+                return;
+        }
+
+        foreach (var existing in targets)
+        {
+            if (IsSameUiTarget(existing, resolved))
+                return;
+        }
+
+        targets.Add(resolved);
+    }
+
+    private object GetComponentInParentExact(object gameObject, Type type)
+    {
+        if (gameObject == null || type == null)
+            return null;
+
+        try
+        {
+            var method = gameObject.GetType().GetMethod(
+                "GetComponentInParent",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(Type) },
+                null);
+            if (method != null)
+                return method.Invoke(gameObject, new object[] { type });
+        }
+        catch
+        {
+            // Ignore and try overload with includeInactive.
+        }
+
+        try
+        {
+            var method = gameObject.GetType().GetMethod(
+                "GetComponentInParent",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(Type), typeof(bool) },
+                null);
+            if (method != null)
+                return method.Invoke(gameObject, new object[] { type, true });
+        }
+        catch
+        {
+            return null;
+        }
+
+        return null;
+    }
+
+    private (float x, float y)? GetDirectionalTargetScreenPosition(object target)
+    {
+        if (target == null)
+            return null;
+
+        // Mirror navigation in dressing room behaves best from its transform position.
+        if (IsDressingRoomActive() && _mirrorType != null && _mirrorType.IsInstanceOfType(target))
+            return GetInteractableScreenPosition(target);
+
+        // For world interactions, collider center matches InputManager raycast behavior
+        // better than transform pivots.
+        var gameObject = GetInteractableGameObject(target) ?? GetGameObjectFromComponent(target) ?? GetMemberValue(target, "gameObject");
+        if (gameObject != null)
+        {
+            var center = GetColliderBoundsCenterFromGameObject(gameObject);
+            if (center != null)
+            {
+                var projected = TryProjectScreenPosition((center.Value.x, center.Value.y, 0f));
+                if (projected != null)
+                {
+                    var width = GetScreenDimension("width");
+                    var height = GetScreenDimension("height");
+                    if (width <= 0 || height <= 0
+                        || (projected.Value.x >= 0 && projected.Value.x <= width
+                            && projected.Value.y >= 0 && projected.Value.y <= height))
+                    {
+                        return projected;
+                    }
+                }
+            }
+        }
+
+        return GetInteractableScreenPosition(target);
     }
 
     private bool TryHandleIntroSkip()
@@ -666,8 +1372,11 @@ public sealed class UiNavigationHandler
         if (!IsDialogActive() || IsMenuActive())
             return;
 
+        var keyboardLockActive = IsKeyboardUiLockActive();
         var roots = GetActiveDialogRoots();
         var current = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
+        if (keyboardLockActive && current != null)
+            return;
         if (current != null && IsUnderDialogRoot(GetInteractableGameObject(current) ?? current, roots))
             return;
 
@@ -699,8 +1408,11 @@ public sealed class UiNavigationHandler
         if (!IsMenuActive())
             return;
 
+        var keyboardLockActive = IsKeyboardUiLockActive();
         var roots = GetActiveMenuRoots();
         var current = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
+        if (keyboardLockActive && current != null)
+            return;
         if (current != null && IsUnderDialogRoot(GetInteractableGameObject(current) ?? current, roots))
             return;
 
@@ -724,10 +1436,13 @@ public sealed class UiNavigationHandler
 
     private void EnsureSpeechBubbleSelection()
     {
-        if (!IsSpeechBubbleDialogActive())
+        if (!IsSpeechBubbleDialogActive() || IsMenuActive())
             return;
 
+        var keyboardLockActive = IsKeyboardUiLockActive();
         var current = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
+        if (keyboardLockActive && current != null)
+            return;
         if (current != null)
         {
             var currentGo = GetInteractableGameObject(current) ?? current;
@@ -753,6 +1468,14 @@ public sealed class UiNavigationHandler
         SetUiSelected(preferred);
         _lastEventSelected = GetInteractableGameObject(preferred) ?? preferred;
         SetInteractableFocus(preferred);
+    }
+
+    private bool IsKeyboardUiLockActive()
+    {
+        if (!_keyboardFocusActive)
+            return false;
+
+        return Environment.TickCount <= _keyboardFocusUntilTick;
     }
 
     private object GetPreferredDialogSelectable()
@@ -1035,8 +1758,26 @@ public sealed class UiNavigationHandler
         if (!IsShopSceneActive())
             return false;
 
+        var index = GetDialogNumberIndex();
+        if (index < 0)
+            return false;
+
         var items = GetShopItemsOrdered();
-        return TryHandleNumberRowPointer(items);
+        if (items.Count == 0 || index >= items.Count)
+            return false;
+
+        var target = items[index];
+        TrySetShopItemShortcutScreenPos(target);
+        if (!TryMoveCursorToInteractable(target))
+            return false;
+
+        var now = Environment.TickCount;
+        _keyboardNavUntilTick = now + 500;
+        _keyboardFocusUntilTick = now + 1500;
+        _keyboardFocusActive = true;
+
+        SetInteractableFocus(target);
+        return true;
     }
 
     private bool TryHandleNumberRowPointer(List<object> targets)
@@ -1952,7 +2693,9 @@ public sealed class UiNavigationHandler
         if (interactable == null)
             return false;
 
-        var screen = _pendingShortcutScreenPos ?? GetInteractableScreenPosition(interactable);
+        var screen = _pendingShortcutScreenPos
+            ?? GetDirectionalTargetScreenPosition(interactable)
+            ?? GetInteractableScreenPosition(interactable);
         _pendingShortcutScreenPos = null;
         if (screen == null)
             return false;
@@ -2049,6 +2792,41 @@ public sealed class UiNavigationHandler
         return false;
     }
 
+    private bool TrySetShopItemShortcutScreenPos(object shopItem)
+    {
+        var item = ResolveShopItem(shopItem) ?? shopItem;
+        if (item == null)
+            return false;
+
+        var gameObject = GetInteractableGameObject(item) ?? GetGameObjectFromComponent(item) ?? GetMemberValue(item, "gameObject");
+        if (gameObject == null)
+            return false;
+
+        var colliderCenter = GetColliderBoundsCenterFromGameObject(gameObject);
+        if (colliderCenter != null)
+        {
+            var colliderScreen = TryProjectScreenPosition((colliderCenter.Value.x, colliderCenter.Value.y, 0f));
+            if (colliderScreen != null)
+            {
+                _pendingShortcutScreenPos = colliderScreen;
+                return true;
+            }
+        }
+
+        var worldPos = GetTransformPosition3(gameObject);
+        if (worldPos != null)
+        {
+            var worldScreen = TryProjectScreenPosition(worldPos.Value);
+            if (worldScreen != null)
+            {
+                _pendingShortcutScreenPos = worldScreen;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private object GetGrimDeskDrawerByField(object drawerTypeValue)
     {
         if (_grimDeskType == null || drawerTypeValue == null)
@@ -2099,6 +2877,43 @@ public sealed class UiNavigationHandler
 
         var gameObject = GetMemberValue(instance, "gameObject");
         return gameObject != null && IsGameObjectActive(gameObject);
+    }
+
+    private bool IsGrimsOfficeSceneActive()
+    {
+        if (_elevatorManagerType != null)
+        {
+            var instance = GetStaticInstance(_elevatorManagerType);
+            if (instance != null)
+            {
+                try
+                {
+                    var method = _elevatorManagerType.GetMethod("GetCurrentScene", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    var scene = method?.Invoke(instance, null)?.ToString();
+                    if (!string.IsNullOrWhiteSpace(scene))
+                    {
+                        // Only Grim's office (Desktop/Office) should use office-specific behavior.
+                        return string.Equals(scene, "Desktop", StringComparison.OrdinalIgnoreCase)
+                               || string.Equals(scene, "Office", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+                catch
+                {
+                    // Fall through to name/state heuristics below.
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(_elevatorSceneName))
+        {
+            return _elevatorSceneName.IndexOf("Desktop", StringComparison.OrdinalIgnoreCase) >= 0
+                   || _elevatorSceneName.IndexOf("Office", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        if (IsShopSceneActive() || IsBarSceneActive() || IsDressingRoomActive() || IsElevatorActive() || IsComicSceneActive())
+            return false;
+
+        return IsOfficeActive();
     }
 
     private bool IsElevatorActive()
@@ -2259,7 +3074,8 @@ public sealed class UiNavigationHandler
             if (method != null)
             {
                 var activeObj = method.Invoke(manager, null);
-                _ = activeObj;
+                if (activeObj is bool isActive && isActive)
+                    return true;
             }
 
             var spawned = GetMemberValue(manager, "SpawnedBubbles") as System.Collections.IEnumerable;
@@ -2275,6 +3091,9 @@ public sealed class UiNavigationHandler
                     continue;
 
                 var button = GetMemberValue(entry, "ButtonSpeechBubble") ?? entry;
+                var go = GetInteractableGameObject(button) ?? GetMemberValue(button, "gameObject");
+                if (go != null && !IsGameObjectActive(go))
+                    continue;
                 if (IsSelectableActive(button))
                     return true;
             }
@@ -2713,6 +3532,13 @@ public sealed class UiNavigationHandler
             return;
         }
 
+        // In world scenes, Enter must submit before hover refresh can override focus.
+        if (submitPressed && ShouldUseUnifiedWorldDirectionalNavigation())
+        {
+            SubmitInteractable();
+            return;
+        }
+
         var uiHit = GetUiRaycastGameObject();
         var hit = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
         if (hit == null && IsShopActive())
@@ -2813,11 +3639,20 @@ public sealed class UiNavigationHandler
         if (_virtualCursorActive)
         {
             var raw = GetRawMousePosition();
+            var now = Environment.TickCount;
+            var keyboardLockActive = _keyboardFocusActive && now <= _keyboardFocusUntilTick;
 
             if (raw != null && _lastRawMousePos != null)
             {
                 var dxRaw = raw.Value.x - _lastRawMousePos.Value.x;
                 var dyRaw = raw.Value.y - _lastRawMousePos.Value.y;
+                // Ignore tiny raw-mouse jitter while keyboard navigation owns focus.
+                if (keyboardLockActive && Math.Abs(dxRaw) <= 2f && Math.Abs(dyRaw) <= 2f)
+                {
+                    _lastRawMousePos = raw;
+                    return;
+                }
+
                 if (Math.Abs(dxRaw) > 0.5f || Math.Abs(dyRaw) > 0.5f)
                 {
                     var screenWidth = Math.Max(GetScreenDimension("width"), 1);
@@ -2839,6 +3674,14 @@ public sealed class UiNavigationHandler
                 mouseDx = GetAxisAny("Mouse X", "MouseX");
             if (Math.Abs(mouseDy) < 0.0001f)
                 mouseDy = GetAxisAny("Mouse Y", "MouseY");
+
+            // Ignore tiny synthetic axis drift while keyboard focus is active.
+            if (keyboardLockActive && Math.Abs(mouseDx) <= 0.2f && Math.Abs(mouseDy) <= 0.2f)
+            {
+                if (raw != null)
+                    _lastRawMousePos = raw;
+                return;
+            }
 
             if (Math.Abs(mouseDx) > 0.03f || Math.Abs(mouseDy) > 0.03f)
             {
@@ -2913,68 +3756,30 @@ public sealed class UiNavigationHandler
 
     private bool TryMoveMenuCursorToNearestOption(NavigationDirection direction)
     {
-        if (!IsMenuActive() || IsOfficeActive() || direction == NavigationDirection.None)
+        if (!IsMenuActive() || direction == NavigationDirection.None)
             return false;
 
         var selectables = GetMenuSelectables(requireScreen: true);
-        if (selectables.Count == 0)
-            selectables = GetMenuSelectables(requireScreen: false);
-        if (selectables.Count == 0)
-            return false;
+        return TryMoveUiCursorToNearestOption(direction, selectables, GetActiveMenuRoots(), includeMouseOriginFallback: true);
+    }
 
-        var origin = _virtualCursorActive ? _virtualCursorPos : GetMousePosition();
-        if (origin == null)
-        {
-            var selected = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
-            if (selected != null)
-                origin = GetInteractableScreenPosition(selected);
-        }
-        if (origin == null)
-            return false;
+    private NavigationDirection GetMenuDirection()
+    {
+        return GetUiArrowDirection();
+    }
 
-        object best = null;
-        var bestScore = float.PositiveInfinity;
-        const float epsilon = 0.01f;
+    private NavigationDirection GetUiArrowDirection()
+    {
+        var upDown = GetKeyDown("UpArrow");
+        var downDown = GetKeyDown("DownArrow");
+        var leftDown = GetKeyDown("LeftArrow");
+        var rightDown = GetKeyDown("RightArrow");
 
-        foreach (var selectable in selectables)
-        {
-            if (selectable == null)
-                continue;
-
-            var pos = GetInteractableScreenPosition(selectable);
-            if (pos == null)
-                continue;
-
-            var dx = pos.Value.x - origin.Value.x;
-            var dy = pos.Value.y - origin.Value.y;
-
-            var inDirection = direction switch
-            {
-                NavigationDirection.Left => dx < -epsilon,
-                NavigationDirection.Right => dx > epsilon,
-                NavigationDirection.Up => dy > epsilon,
-                NavigationDirection.Down => dy < -epsilon,
-                _ => false
-            };
-            if (!inDirection)
-                continue;
-
-            var score = (dx * dx) + (dy * dy);
-            if (score >= bestScore)
-                continue;
-
-            bestScore = score;
-            best = selectable;
-        }
-
-        if (best == null)
-            return false;
-
-        SetUiSelected(best);
-        _lastEventSelected = GetInteractableGameObject(best) ?? best;
-        SetInteractableFocus(best);
-        TrySyncUnifiedCursorToSelectedUi();
-        return true;
+        if (upDown) return NavigationDirection.Up;
+        if (downDown) return NavigationDirection.Down;
+        if (leftDown) return NavigationDirection.Left;
+        if (rightDown) return NavigationDirection.Right;
+        return NavigationDirection.None;
     }
 
     private bool TryMoveDialogCursorToNearestOption(NavigationDirection direction)
@@ -2982,10 +3787,24 @@ public sealed class UiNavigationHandler
         if ((!IsDialogActive() && !IsSpeechBubbleDialogActive()) || direction == NavigationDirection.None)
             return false;
 
+        if (IsSpeechBubbleDialogActive())
+        {
+            var speechBubbles = GetSpeechBubbleSelectables(requireScreen: true);
+            if (speechBubbles.Count > 0)
+                return TryMoveUiCursorToNearestOption(direction, speechBubbles, activeRoots: null, includeMouseOriginFallback: true);
+        }
+
         var selectables = GetDialogSelectables(requireScreen: true);
-        if (selectables.Count == 0)
-            selectables = GetDialogSelectables(requireScreen: false);
-        if (selectables.Count == 0)
+        return TryMoveUiCursorToNearestOption(direction, selectables, GetActiveDialogRoots(), includeMouseOriginFallback: true);
+    }
+
+    private bool TryMoveUiCursorToNearestOption(
+        NavigationDirection direction,
+        List<object> selectables,
+        List<object> activeRoots,
+        bool includeMouseOriginFallback)
+    {
+        if (direction == NavigationDirection.None || selectables == null || selectables.Count == 0)
             return false;
 
         var candidates = new List<object>(selectables.Count);
@@ -3012,11 +3831,28 @@ public sealed class UiNavigationHandler
         if (candidates.Count == 0)
             return false;
 
-        (float x, float y)? origin = null;
+        var scoped = FilterCandidatesToActiveRoot(candidates, activeRoots);
+        if (scoped.Count > 0)
+            candidates = scoped;
 
+        (float x, float y)? origin = null;
         var selected = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
         if (selected != null)
             origin = GetInteractableScreenPosition(selected);
+
+        if (origin == null)
+        {
+            var lastSelected = ResolveUiFocusTarget(_lastEventSelected) ?? _lastEventSelected;
+            if (lastSelected != null)
+                origin = GetInteractableScreenPosition(lastSelected);
+        }
+
+        if (origin == null)
+        {
+            var focused = ResolveUiFocusTarget(_lastFocusedInteractable) ?? _lastFocusedInteractable;
+            if (focused != null)
+                origin = GetInteractableScreenPosition(focused);
+        }
 
         if (origin == null && TryGetHoveredUiTarget(out var hoveredTarget))
         {
@@ -3027,12 +3863,17 @@ public sealed class UiNavigationHandler
         if (origin == null && _virtualCursorActive)
             origin = _virtualCursorPos;
 
+        if (origin == null && includeMouseOriginFallback)
+            origin = GetMousePosition();
+
         if (origin == null)
             return false;
 
-        const float epsilon = 0.01f;
         object best = null;
+        var bestForward = float.PositiveInfinity;
+        var bestCross = float.PositiveInfinity;
         var bestScore = float.PositiveInfinity;
+        const float epsilon = 0.01f;
 
         foreach (var candidate in candidates)
         {
@@ -3043,21 +3884,39 @@ public sealed class UiNavigationHandler
             var dx = pos.Value.x - origin.Value.x;
             var dy = pos.Value.y - origin.Value.y;
 
-            var inDirection = direction switch
+            var forward = direction switch
             {
-                NavigationDirection.Left => dx < -epsilon,
-                NavigationDirection.Right => dx > epsilon,
-                NavigationDirection.Up => dy > epsilon,
-                NavigationDirection.Down => dy < -epsilon,
-                _ => false
+                NavigationDirection.Left => -dx,
+                NavigationDirection.Right => dx,
+                NavigationDirection.Up => dy,
+                NavigationDirection.Down => -dy,
+                _ => 0f
             };
-            if (!inDirection)
+
+            if (forward <= epsilon)
                 continue;
 
+            var cross = direction switch
+            {
+                NavigationDirection.Left => Math.Abs(dy),
+                NavigationDirection.Right => Math.Abs(dy),
+                NavigationDirection.Up => Math.Abs(dx),
+                NavigationDirection.Down => Math.Abs(dx),
+                _ => float.PositiveInfinity
+            };
             var score = (dx * dx) + (dy * dy);
-            if (score >= bestScore)
+
+            var betterForward = forward < bestForward - epsilon;
+            var equalForward = Math.Abs(forward - bestForward) <= epsilon;
+            var betterCross = equalForward && cross < bestCross - epsilon;
+            var equalCross = equalForward && Math.Abs(cross - bestCross) <= epsilon;
+            var betterScore = equalCross && score < bestScore;
+
+            if (!betterForward && !betterCross && !betterScore)
                 continue;
 
+            bestForward = forward;
+            bestCross = cross;
             bestScore = score;
             best = candidate;
         }
@@ -3134,61 +3993,59 @@ public sealed class UiNavigationHandler
         return true;
     }
 
-    private bool TryMoveConversationChoiceByOrder(NavigationDirection direction)
+    private List<object> FilterCandidatesToActiveRoot(List<object> candidates, List<object> roots)
     {
-        if ((!IsDialogActive() && !IsSpeechBubbleDialogActive()) || direction == NavigationDirection.None)
-            return false;
+        if (candidates == null || candidates.Count == 0 || roots == null || roots.Count <= 1)
+            return candidates ?? new List<object>();
 
-        var list = GetDialogSelectables(requireScreen: true);
-        if (list.Count == 0)
-            list = GetDialogSelectables(requireScreen: false);
-        if (list.Count == 0)
-            return false;
+        object anchor = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
+        if (anchor == null)
+            anchor = ResolveUiFocusTarget(_lastEventSelected) ?? _lastEventSelected;
+        if (anchor == null)
+            anchor = ResolveUiFocusTarget(_lastFocusedInteractable) ?? _lastFocusedInteractable;
+        if (anchor == null && TryGetHoveredUiTarget(out var hoveredTarget))
+            anchor = ResolveUiFocusTarget(hoveredTarget) ?? hoveredTarget;
 
-        var ordered = OrderTargetsByScreenPosition(list, requireOnScreen: true);
-        if (ordered.Count == 0)
-            ordered = OrderTargetsByScreenPosition(list, requireOnScreen: false);
-        if (ordered.Count == 0)
-            return false;
+        var anchorRoot = GetCandidateRoot(anchor, roots);
+        if (anchorRoot == null)
+            return candidates;
 
-        var current = ResolveUiFocusTarget(GetCurrentSelectedGameObject());
-        if (current == null)
-            current = ResolveUiFocusTarget(_lastEventSelected) ?? _lastEventSelected;
-        if (current == null && TryGetHoveredUiTarget(out var hovered))
-            current = ResolveUiFocusTarget(hovered) ?? hovered;
-
-        var currentIndex = -1;
-        if (current != null)
+        var filtered = new List<object>(candidates.Count);
+        foreach (var candidate in candidates)
         {
-            for (var i = 0; i < ordered.Count; i++)
-            {
-                if (IsSameUiTarget(ordered[i], current))
-                {
-                    currentIndex = i;
-                    break;
-                }
-            }
+            var candidateRoot = GetCandidateRoot(candidate, roots);
+            if (candidateRoot != null && ReferenceEquals(candidateRoot, anchorRoot))
+                filtered.Add(candidate);
         }
 
-        var forward = direction == NavigationDirection.Down || direction == NavigationDirection.Right;
-        var nextIndex = currentIndex < 0
-            ? (forward ? 0 : ordered.Count - 1)
-            : (forward ? currentIndex + 1 : currentIndex - 1);
+        return filtered.Count > 0 ? filtered : candidates;
+    }
 
-        if (nextIndex < 0)
-            nextIndex = ordered.Count - 1;
-        else if (nextIndex >= ordered.Count)
-            nextIndex = 0;
+    private object GetCandidateRoot(object candidate, List<object> roots)
+    {
+        if (candidate == null || roots == null || roots.Count == 0)
+            return null;
 
-        var target = ordered[nextIndex];
-        if (target == null)
-            return false;
+        var gameObject = GetInteractableGameObject(candidate) ?? GetGameObjectFromComponent(candidate) ?? candidate;
+        if (gameObject == null)
+            return null;
 
-        SetUiSelected(target);
-        _lastEventSelected = GetInteractableGameObject(target) ?? target;
-        SetInteractableFocus(target);
-        TrySyncUnifiedCursorToSelectedUi();
-        return true;
+        foreach (var root in roots)
+        {
+            if (root == null)
+                continue;
+
+            var singleton = new List<object>(1) { root };
+            if (IsUnderDialogRoot(gameObject, singleton))
+                return root;
+        }
+
+        return null;
+    }
+
+    private bool TryMoveConversationChoiceByOrder(NavigationDirection direction)
+    {
+        return TryMoveDialogCursorToNearestOption(direction);
     }
 
     private void SyncUiSelectionFromUnifiedCursor(bool forceFromKeyboard = false)
@@ -5448,6 +6305,8 @@ public sealed class UiNavigationHandler
 
     private void ClearInteractableFocus()
     {
+        _lastSnappedWorldInteractable = null;
+
         if (_lastFocusedInteractable == null)
             return;
 
@@ -5498,26 +6357,34 @@ public sealed class UiNavigationHandler
             return;
         }
 
-        _cachedAxisX = GetAxisRawAny(
-            "Horizontal",
-            "DPadX",
-            "DpadX",
-            "DPadHorizontal",
-            "DpadHorizontal",
-            "DPad_X",
-            "Dpad_X",
-            "HatX",
-            "JoyHatX");
-        _cachedAxisY = GetAxisRawAny(
-            "Vertical",
-            "DPadY",
-            "DpadY",
-            "DPadVertical",
-            "DpadVertical",
-            "DPad_Y",
-            "Dpad_Y",
-            "HatY",
-            "JoyHatY");
+        _readingRawAxes = true;
+        try
+        {
+            _cachedAxisX = GetAxisRawAny(
+                "Horizontal",
+                "DPadX",
+                "DpadX",
+                "DPadHorizontal",
+                "DpadHorizontal",
+                "DPad_X",
+                "Dpad_X",
+                "HatX",
+                "JoyHatX");
+            _cachedAxisY = GetAxisRawAny(
+                "Vertical",
+                "DPadY",
+                "DpadY",
+                "DPadVertical",
+                "DpadVertical",
+                "DPad_Y",
+                "Dpad_Y",
+                "HatY",
+                "JoyHatY");
+        }
+        finally
+        {
+            _readingRawAxes = false;
+        }
         if (IsOfficeActive() && (GetKey("W") || GetKey("A") || GetKey("S") || GetKey("D")))
         {
             _cachedAxisX = 0f;
@@ -5624,6 +6491,9 @@ public sealed class UiNavigationHandler
     private void SyncEventSystemSelectionIfNeeded()
     {
         if (_eventSystemType == null)
+            return;
+
+        if (IsMenuActive() || IsDialogActive() || IsSpeechBubbleDialogActive())
             return;
 
         var now = Environment.TickCount;
@@ -5895,6 +6765,108 @@ public sealed class UiNavigationHandler
             }
         }
 
+        if (TrySubmitSpeechBubble())
+        {
+            _virtualCursorMovedSinceLastSubmit = false;
+            return;
+        }
+
+        // In non-office world scenes (elevator/bar/shop/dressing room), submit should
+        // activate the current world interactable focus first.
+        if (ShouldUseUnifiedWorldDirectionalNavigation())
+        {
+            var focusedWorldTarget = ResolveInteractableForFocus(_lastFocusedInteractable) ?? _lastFocusedInteractable;
+            var snappedWorldTarget = ResolveInteractableForFocus(_lastSnappedWorldInteractable) ?? _lastSnappedWorldInteractable;
+            if (IsWorldSubmitCandidate(snappedWorldTarget))
+                focusedWorldTarget = snappedWorldTarget;
+            if (focusedWorldTarget != null)
+            {
+                // Keyboard-owned submit must never fall through to a different hover/nearest
+                // target, otherwise Enter can trigger a different destination than announced.
+                if (!IsWorldSubmitCandidate(focusedWorldTarget))
+                    focusedWorldTarget = null;
+                else
+                {
+                    _lastFocusedInteractable = focusedWorldTarget;
+                    _lastSnappedWorldInteractable = focusedWorldTarget;
+                    SetInteractableFocus(focusedWorldTarget);
+
+                    if (TryErasePaperworkMark(focusedWorldTarget))
+                    {
+                        _virtualCursorMovedSinceLastSubmit = false;
+                        return;
+                    }
+
+                    if (TryInvokeInteract(focusedWorldTarget))
+                    {
+                        TryAnnounceDressingRoomSelection(focusedWorldTarget);
+                        _virtualCursorMovedSinceLastSubmit = false;
+                        return;
+                    }
+
+                    if (TryInvokeUiClickResult(focusedWorldTarget))
+                    {
+                        TryAnnounceDressingRoomSelection(focusedWorldTarget);
+                        _virtualCursorMovedSinceLastSubmit = false;
+                        return;
+                    }
+
+                    TryInvokeUiClick(focusedWorldTarget);
+                    _virtualCursorMovedSinceLastSubmit = false;
+                    return;
+                }
+            }
+
+            object worldTarget = null;
+            if (IsWorldSubmitCandidate(focusedWorldTarget))
+                worldTarget = focusedWorldTarget;
+
+            var mousePosition = GetMousePosition();
+            if (worldTarget == null && mousePosition != null)
+                worldTarget = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
+            if (!IsWorldSubmitCandidate(worldTarget))
+                worldTarget = null;
+
+            if (worldTarget == null)
+            {
+                worldTarget = IsElevatorActive()
+                    ? GetNearestEnabledElevatorButtonToCursor()
+                    : GetNearestWorldInteractableToCursor(actionableOnly: true);
+            }
+
+            worldTarget = ResolveInteractableForFocus(worldTarget) ?? worldTarget;
+            if (worldTarget != null && IsInteractableActive(worldTarget) && IsWorldSubmitCandidate(worldTarget))
+            {
+                _lastFocusedInteractable = worldTarget;
+                _lastSnappedWorldInteractable = worldTarget;
+                SetInteractableFocus(worldTarget);
+
+                if (TryErasePaperworkMark(worldTarget))
+                {
+                    _virtualCursorMovedSinceLastSubmit = false;
+                    return;
+                }
+
+                if (TryInvokeInteract(worldTarget))
+                {
+                    TryAnnounceDressingRoomSelection(worldTarget);
+                    _virtualCursorMovedSinceLastSubmit = false;
+                    return;
+                }
+
+                if (TryInvokeUiClickResult(worldTarget))
+                {
+                    TryAnnounceDressingRoomSelection(worldTarget);
+                    _virtualCursorMovedSinceLastSubmit = false;
+                    return;
+                }
+
+                TryInvokeUiClick(worldTarget);
+                _virtualCursorMovedSinceLastSubmit = false;
+                return;
+            }
+        }
+
         var uiObject = GetUiRaycastGameObject();
         if (uiObject != null)
         {
@@ -5915,9 +6887,13 @@ public sealed class UiNavigationHandler
                 return;
             }
 
-            TryInvokeUiClick(uiTarget);
-            _virtualCursorMovedSinceLastSubmit = false;
-            return;
+            // In non-UI gameplay scenes, do not swallow submit when a non-actionable UI
+            // element is under the cursor; continue to world interactable resolution.
+            if (IsMenuActive() || IsDialogActive() || IsSpeechBubbleDialogActive())
+            {
+                _virtualCursorMovedSinceLastSubmit = false;
+                return;
+            }
         }
 
         if (_virtualCursorActive)
@@ -5928,10 +6904,10 @@ public sealed class UiNavigationHandler
                 var hit = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
                 if (hit != null)
                     _lastFocusedInteractable = hit;
-                else if (_virtualCursorMovedSinceLastSubmit)
+                else if (_virtualCursorMovedSinceLastSubmit && _lastFocusedInteractable == null)
                     return;
             }
-            else if (_virtualCursorMovedSinceLastSubmit)
+            else if (_virtualCursorMovedSinceLastSubmit && _lastFocusedInteractable == null)
             {
                 return;
             }
@@ -5960,6 +6936,19 @@ public sealed class UiNavigationHandler
                 _lastFocusedInteractable = GetInteractableAtScreenPosition(mousePosition.Value.x, mousePosition.Value.y);
         }
 
+        if (ShouldUseUnifiedWorldDirectionalNavigation())
+        {
+            if (_lastFocusedInteractable != null && !IsInteractableActive(_lastFocusedInteractable))
+                _lastFocusedInteractable = null;
+
+            if (_lastFocusedInteractable == null)
+            {
+                var fallback = GetNearestWorldInteractableToCursor(actionableOnly: true);
+                if (fallback != null)
+                    _lastFocusedInteractable = fallback;
+            }
+        }
+
         if (_lastFocusedInteractable == null)
             return;
 
@@ -5977,6 +6966,195 @@ public sealed class UiNavigationHandler
         _virtualCursorMovedSinceLastSubmit = false;
 
         // No extra focus logic; rely on the virtual cursor + raycast.
+    }
+
+    private bool TrySubmitSpeechBubble()
+    {
+        if (!IsSpeechBubbleDialogActive() || _speechBubbleManagerType == null)
+            return false;
+
+        var manager = GetStaticInstance(_speechBubbleManagerType);
+        if (manager == null)
+            return false;
+
+        object ResolveSpeechBubbleButton(object bubble)
+        {
+            if (bubble == null)
+                return null;
+
+            var button = GetMemberValue(bubble, "ButtonSpeechBubble") ?? bubble;
+            return IsSelectableActive(button) ? button : null;
+        }
+
+        // 1) If a speaker bubble is active, Enter should continue via that bubble first.
+        try
+        {
+            var getSpeaker = _speechBubbleManagerType.GetMethod("GetSpeakerBubble", BindingFlags.Instance | BindingFlags.Public);
+            var speaker = getSpeaker?.Invoke(manager, null);
+            var speakerButton = ResolveSpeechBubbleButton(speaker);
+            if (speakerButton != null)
+                return TryActivateDialogSelectable(speakerButton);
+        }
+        catch
+        {
+            // Ignore and continue fallback resolution.
+        }
+
+        // 2) Prefer currently hovered/selected speech-bubble option.
+        if (TryGetHoveredUiTarget(out var hoveredTarget))
+        {
+            var hoveredButton = ResolveSpeechBubbleButton(hoveredTarget);
+            if (hoveredButton != null)
+                return TryActivateDialogSelectable(hoveredButton);
+        }
+
+        var selected = GetCurrentSelectedGameObject();
+        var selectedButton = ResolveSpeechBubbleButton(selected);
+        if (selectedButton != null)
+            return TryActivateDialogSelectable(selectedButton);
+
+        // 3) Fallback to first available non-speaker bubble option.
+        var options = GetSpeechBubbleSelectables(requireScreen: true);
+        if (options.Count == 0)
+            options = GetSpeechBubbleSelectables(requireScreen: false);
+        if (options.Count > 0)
+            return TryActivateDialogSelectable(options[0]);
+
+        return false;
+    }
+
+    private object GetNearestWorldInteractableToCursor(bool actionableOnly = false)
+    {
+        if (!ShouldUseUnifiedWorldDirectionalNavigation())
+            return null;
+
+        var origin = GetMousePosition();
+        if (origin == null)
+            return null;
+
+        var targets = GetWorldInteractableTargets();
+        if (targets.Count == 0)
+            targets = GetSceneNumberRowTargets();
+        if (targets.Count == 0)
+            return null;
+
+        const float epsilon = 0.01f;
+        object best = null;
+        var bestScore = float.PositiveInfinity;
+        string bestOrderKey = null;
+
+        foreach (var target in targets)
+        {
+            if (target == null)
+                continue;
+
+            var resolved = ResolveInteractableForFocus(target) ?? target;
+            if (resolved == null || !IsInteractableActive(resolved))
+                continue;
+            if (actionableOnly && !IsWorldSubmitCandidate(resolved))
+                continue;
+
+            var pos = GetDirectionalTargetScreenPosition(resolved);
+            if (pos == null)
+                continue;
+
+            var dx = pos.Value.x - origin.Value.x;
+            var dy = pos.Value.y - origin.Value.y;
+            var score = (dx * dx) + (dy * dy);
+
+            if (score < bestScore - epsilon)
+            {
+                bestScore = score;
+                best = resolved;
+                bestOrderKey = GetDirectionalTargetOrderKey(resolved);
+                continue;
+            }
+
+            if (Math.Abs(score - bestScore) <= epsilon)
+            {
+                var key = GetDirectionalTargetOrderKey(resolved);
+                if (string.Compare(key, bestOrderKey, StringComparison.Ordinal) < 0)
+                {
+                    best = resolved;
+                    bestOrderKey = key;
+                }
+            }
+        }
+
+        return best;
+    }
+
+    private object GetNearestEnabledElevatorButtonToCursor()
+    {
+        var buttons = GetEnabledElevatorButtons();
+        if (buttons.Count == 0)
+            return null;
+
+        var origin = GetMousePosition();
+        if (origin == null)
+            return buttons[0];
+
+        const float epsilon = 0.01f;
+        object best = null;
+        var bestScore = float.PositiveInfinity;
+        string bestOrderKey = null;
+
+        foreach (var button in buttons)
+        {
+            var pos = GetDirectionalTargetScreenPosition(button);
+            if (pos == null)
+                continue;
+
+            var dx = pos.Value.x - origin.Value.x;
+            var dy = pos.Value.y - origin.Value.y;
+            var score = (dx * dx) + (dy * dy);
+
+            if (score < bestScore - epsilon)
+            {
+                best = button;
+                bestScore = score;
+                bestOrderKey = GetDirectionalTargetOrderKey(button);
+                continue;
+            }
+
+            if (Math.Abs(score - bestScore) <= epsilon)
+            {
+                var key = GetDirectionalTargetOrderKey(button);
+                if (string.Compare(key, bestOrderKey, StringComparison.Ordinal) < 0)
+                {
+                    best = button;
+                    bestOrderKey = key;
+                }
+            }
+        }
+
+        return best ?? buttons[0];
+    }
+
+    private bool IsWorldSubmitCandidate(object target)
+    {
+        if (target == null)
+            return false;
+
+        var resolved = ResolveInteractableForFocus(target) ?? target;
+        if (resolved == null || !IsInteractableActive(resolved))
+            return false;
+        if (!IsInteractableInstance(resolved))
+            return false;
+
+        // ElevatorButton exposes internal enable state; disabled buttons no-op on Interact().
+        try
+        {
+            var enabledField = resolved.GetType().GetField("bIsEnabled", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (enabledField?.GetValue(resolved) is bool bEnabled && !bEnabled)
+                return false;
+        }
+        catch
+        {
+            // Ignore reflection failures and allow candidate.
+        }
+
+        return true;
     }
 
     private object ResolveConfirmDialogSubmitTarget(object confirmInstance)
@@ -7033,8 +8211,16 @@ public sealed class UiNavigationHandler
             return;
         }
 
-        if (_lastFocusedInteractable != null && IsSameUiTarget(_lastFocusedInteractable, interactable))
-            return;
+        if (_lastFocusedInteractable != null)
+        {
+            var sameTarget = (IsInteractableInstance(_lastFocusedInteractable) && IsInteractableInstance(interactable))
+                ? IsSameWorldTarget(_lastFocusedInteractable, interactable)
+                : ShouldUseUnifiedWorldDirectionalNavigation()
+                    ? IsSameWorldTarget(_lastFocusedInteractable, interactable)
+                    : IsSameUiTarget(_lastFocusedInteractable, interactable);
+            if (sameTarget)
+                return;
+        }
 
         if (_lastFocusedInteractable != null && !ReferenceEquals(_lastFocusedInteractable, interactable))
         {
@@ -7055,18 +8241,53 @@ public sealed class UiNavigationHandler
         {
             SetUiSelected(interactable);
         }
+        var announceTarget = interactable;
         var hoverText = GetHoverText(interactable);
         if (string.IsNullOrWhiteSpace(hoverText))
         {
-            var shopItem = ResolveShopItem(interactable);
+            var resolved = ResolveInteractableForFocus(interactable);
+            if (resolved != null)
+            {
+                var resolvedHover = GetHoverText(resolved);
+                if (!string.IsNullOrWhiteSpace(resolvedHover))
+                {
+                    hoverText = resolvedHover;
+                    announceTarget = resolved;
+                }
+            }
+        }
+        if (string.IsNullOrWhiteSpace(hoverText))
+        {
+            var shopItem = ResolveShopItem(announceTarget);
             if (shopItem != null)
                 hoverText = GetHoverText(shopItem);
         }
-        var speechBubbleText = GetSpeechBubbleTextForInteractable(interactable);
-        if (!string.IsNullOrWhiteSpace(speechBubbleText))
-            hoverText = speechBubbleText;
+        if (string.IsNullOrWhiteSpace(hoverText) && _elevatorButtonType != null)
+        {
+            var go = GetInteractableGameObject(interactable) ?? GetGameObjectFromComponent(interactable) ?? GetMemberValue(interactable, "gameObject");
+            var elevatorButton = _elevatorButtonType.IsInstanceOfType(interactable)
+                ? interactable
+                : GetComponentInParentByType(go, _elevatorButtonType);
+            if (elevatorButton != null)
+            {
+                var elevatorHover = GetHoverText(elevatorButton);
+                if (!string.IsNullOrWhiteSpace(elevatorHover))
+                {
+                    hoverText = elevatorHover;
+                    announceTarget = elevatorButton;
+                }
+            }
+        }
+        if (IsDialogActive() || IsSpeechBubbleDialogActive())
+        {
+            var speechBubbleText = GetSpeechBubbleTextForInteractable(announceTarget);
+            if (!string.IsNullOrWhiteSpace(speechBubbleText))
+                hoverText = speechBubbleText;
+        }
         UpdateHudHoverText(hoverText);
-        AnnounceHoverText(hoverText, interactable);
+        if (TryAnnounceDressingRoomMirrorFocus(announceTarget))
+            return;
+        AnnounceHoverText(hoverText, announceTarget);
     }
 
     private string GetFocusTargetKey(object interactable)
@@ -7164,7 +8385,8 @@ public sealed class UiNavigationHandler
         if (_screenreader == null)
             return;
 
-        if (IsMenuActive() || IsDialogActive() || IsSpeechBubbleDialogActive())
+        if ((IsMenuActive() || IsDialogActive() || IsSpeechBubbleDialogActive())
+            && !IsInteractableInstance(interactable))
             return;
 
         var built = BuildHoverText(interactable, hoverText);
@@ -7175,6 +8397,28 @@ public sealed class UiNavigationHandler
         if (!string.IsNullOrWhiteSpace(signature)
             && string.Equals(signature, _lastHoverAnnouncementSignature, StringComparison.Ordinal))
         {
+            return;
+        }
+
+        if (IsDressingRoomActive())
+        {
+            if (!string.IsNullOrWhiteSpace(signature))
+                _screenreader.AnnouncePriorityWithSource(built, signature);
+            else
+                _screenreader.AnnouncePriority(built);
+
+            _lastHoverAnnouncementSignature = signature;
+            return;
+        }
+
+        if (IsInteractableInstance(interactable) && ShouldUseUnifiedWorldDirectionalNavigation())
+        {
+            if (!string.IsNullOrWhiteSpace(signature))
+                _screenreader.AnnouncePriorityWithSource(built, signature);
+            else
+                _screenreader.AnnouncePriority(built);
+
+            _lastHoverAnnouncementSignature = signature;
             return;
         }
 
@@ -7209,6 +8453,30 @@ public sealed class UiNavigationHandler
         return $"{key}|{normalizedText}";
     }
 
+    private bool TryAnnounceDressingRoomMirrorFocus(object interactable)
+    {
+        if (_screenreader == null || !IsDressingRoomActive() || interactable == null)
+            return false;
+
+        if (!IsMirrorTarget(interactable))
+            return false;
+
+        var label = GetDressingRoomMirrorLabel(interactable);
+        if (string.IsNullOrWhiteSpace(label))
+            return false;
+
+        var signature = BuildHoverAnnouncementSignature(interactable, label) ?? $"mirror|{NormalizeAnnouncementText(label)}";
+        if (!string.IsNullOrWhiteSpace(signature)
+            && string.Equals(signature, _lastHoverAnnouncementSignature, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        _screenreader.AnnouncePriorityWithSource(label, signature);
+        _lastHoverAnnouncementSignature = signature;
+        return true;
+    }
+
     private static string NormalizeAnnouncementText(string value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -7237,14 +8505,34 @@ public sealed class UiNavigationHandler
 
     private string BuildHoverText(object interactable, string hoverText)
     {
-        var speechBubbleText = GetSpeechBubbleTextForInteractable(interactable);
-        if (!string.IsNullOrWhiteSpace(speechBubbleText))
-            return speechBubbleText;
+        if (IsDialogActive() || IsSpeechBubbleDialogActive())
+        {
+            var speechBubbleText = GetSpeechBubbleTextForInteractable(interactable);
+            if (!string.IsNullOrWhiteSpace(speechBubbleText))
+                return speechBubbleText;
+        }
 
         if (!string.IsNullOrWhiteSpace(hoverText) && IsMoneyNotificationText(hoverText))
             return null;
 
         var dressingLabel = GetDressingRoomInteractableLabel(interactable);
+        if (IsDressingRoomActive())
+        {
+            // In dressing room, prefer explicit slot/mirror labels over HUD hover fallback.
+            if (!string.IsNullOrWhiteSpace(dressingLabel))
+                return dressingLabel;
+
+            var sanitizedHover = SanitizeHoverText(hoverText);
+            if (!string.IsNullOrWhiteSpace(sanitizedHover)
+                && !LooksLikeValueText(sanitizedHover)
+                && !IsExcludedDressingMirrorPhrase(sanitizedHover))
+                return sanitizedHover;
+
+            var fallbackName = SanitizeHoverText(GetGameObjectName(interactable));
+            if (!string.IsNullOrWhiteSpace(fallbackName) && !IsExcludedDressingMirrorPhrase(fallbackName))
+                return fallbackName;
+        }
+
         if (!string.IsNullOrWhiteSpace(dressingLabel))
         {
             if (string.IsNullOrWhiteSpace(hoverText))
@@ -7279,6 +8567,23 @@ public sealed class UiNavigationHandler
         }
         else
         {
+            var directHover = SanitizeHoverText(hoverText);
+            directHover = StripLeadingMoneySentence(directHover);
+            if (!string.IsNullOrWhiteSpace(directHover) && !LooksLikeValueText(directHover))
+                return directHover;
+
+            // In world navigation scenes, HUD hover text can be stale/unrelated and must
+            // not override the focused interactable label.
+            if (IsBarSceneActive() || IsElevatorActive() || IsDressingRoomActive())
+            {
+                var sceneNameFallback = IsBarSceneActive()
+                    ? SanitizeSceneObjectName(GetGameObjectName(interactable))
+                    : SanitizeHoverText(GetGameObjectName(interactable));
+                sceneNameFallback = StripLeadingMoneySentence(sceneNameFallback);
+                if (!string.IsNullOrWhiteSpace(sceneNameFallback) && !LooksLikeValueText(sceneNameFallback))
+                    return sceneNameFallback;
+            }
+
             var hudHover = GetHudHoverText();
             hudHover = SanitizeHoverText(hudHover);
             hudHover = StripLeadingMoneySentence(hudHover);
@@ -7347,7 +8652,14 @@ public sealed class UiNavigationHandler
         }
 
         if (string.IsNullOrWhiteSpace(hoverText))
+        {
+            var fallbackName = IsBarSceneActive()
+                ? SanitizeSceneObjectName(GetGameObjectName(interactable))
+                : SanitizeHoverText(GetGameObjectName(interactable));
+            if (!string.IsNullOrWhiteSpace(fallbackName) && !LooksLikeValueText(fallbackName))
+                return fallbackName;
             return null;
+        }
 
         if (IsShopActive() && !string.IsNullOrWhiteSpace(hoverText) && LooksLikeValueText(hoverText))
         {
@@ -7364,7 +8676,109 @@ public sealed class UiNavigationHandler
 
     private string GetDressingRoomInteractableLabel(object interactable)
     {
+        if (!IsDressingRoomActive() || interactable == null)
+            return null;
+
+        var target = ResolveInteractableForFocus(interactable) ?? interactable;
+        if (IsMirrorTarget(target))
+            return GetDressingRoomMirrorLabel(target);
+
+        if (_mirrorNavigationButtonType == null || !_mirrorNavigationButtonType.IsInstanceOfType(target))
+            return null;
+
+        var typeValue = GetMemberValue(target, "Type") ?? GetMemberValue(target, "type");
+        var typeText = typeValue?.ToString();
+        if (string.IsNullOrWhiteSpace(typeText))
+            return null;
+
+        var mirror = _mirrorType != null ? GetStaticInstance(_mirrorType) : null;
+        if (mirror == null)
+            return null;
+
+        object textObj = null;
+        if (string.Equals(typeText, "Head", StringComparison.OrdinalIgnoreCase))
+            textObj = GetMemberValue(mirror, "TextHead");
+        else if (string.Equals(typeText, "Body", StringComparison.OrdinalIgnoreCase))
+            textObj = GetMemberValue(mirror, "TextBody");
+
+        if (textObj == null)
+            return null;
+
+        try
+        {
+            var textProp = textObj.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public);
+            var value = textProp?.GetValue(textObj) as string;
+            value = SanitizeHoverText(value);
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            // Include the active slot so users know whether they are changing head/body.
+            return $"{typeText}: {value}";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private bool IsMirrorTarget(object target)
+    {
+        if (target == null || _mirrorType == null)
+            return false;
+
+        // Mirror navigation controls are separate focus targets and must not
+        // be collapsed into the mirror label path.
+        if (_mirrorNavigationButtonType != null && _mirrorNavigationButtonType.IsInstanceOfType(target))
+            return false;
+
+        if (_mirrorType.IsInstanceOfType(target))
+            return true;
+
+        var gameObject = GetInteractableGameObject(target) ?? GetGameObjectFromComponent(target) ?? GetMemberValue(target, "gameObject");
+        if (gameObject == null)
+            return false;
+
+        if (_mirrorNavigationButtonType != null)
+        {
+            var navSelf = GetComponentByType(gameObject, _mirrorNavigationButtonType);
+            var navParent = GetComponentInParentByType(gameObject, _mirrorNavigationButtonType);
+            if (navSelf != null || navParent != null)
+                return false;
+        }
+
+        var mirror = GetComponentByType(gameObject, _mirrorType);
+        if (mirror != null)
+            return true;
+
+        var mirrorParent = GetComponentInParentByType(gameObject, _mirrorType);
+        return mirrorParent != null;
+    }
+
+    private string GetDressingRoomMirrorLabel(object focusedTarget)
+    {
+        // Use dressing-room-local sources only.
+        var mirror = _mirrorType != null ? GetStaticInstance(_mirrorType) : null;
+        if (mirror != null)
+        {
+            var direct = SanitizeHoverText(GetHoverText(mirror));
+            if (!string.IsNullOrWhiteSpace(direct) && !IsExcludedDressingMirrorPhrase(direct))
+                return direct;
+        }
+
+        var mirrorName = SanitizeHoverText(GetGameObjectName(mirror));
+        if (!string.IsNullOrWhiteSpace(mirrorName) && !IsExcludedDressingMirrorPhrase(mirrorName))
+            return mirrorName;
+
         return null;
+    }
+
+    private static bool IsExcludedDressingMirrorPhrase(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        return text.IndexOf("mirror on the wall", StringComparison.OrdinalIgnoreCase) >= 0
+            || text.IndexOf("grimmest of them all", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private void TryAnnounceDressingRoomSelection(object interactable)
@@ -7411,10 +8825,9 @@ public sealed class UiNavigationHandler
         if (IsDialogActive())
             return;
 
-        if (_screenreader.IsBusy)
-            return;
-
-        _screenreader.Announce(selection);
+        var spoken = $"{typeText}: {selection}";
+        var sourceKey = $"dressing-room-{typeText}".ToLowerInvariant();
+        _screenreader.AnnouncePriorityWithSource(spoken, sourceKey);
     }
 
     private string StripLeadingMoneySentence(string text)

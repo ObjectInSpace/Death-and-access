@@ -44,9 +44,10 @@ public class SpecificTextAnnouncer
     private int _lastHoveredSeenTick;
     private LampState _deskLampState;
     private string _lastSceneName;
-    private string _lastAnnouncedChoiceText;
+    private string _lastAnnouncedChoiceSignature;
     private string _lastShopHoverText;
     private string _lastMouseHoverText;
+    private string _lastMouseHoverSignature;
     private string _lastEmittedAnnouncementKey;
     private bool _promptReplayHandledInUpdate;
     private bool _liveDialogueListenerEnabled;
@@ -73,10 +74,12 @@ public class SpecificTextAnnouncer
         _lastSceneName = sceneName;
         if (sceneChanged)
         {
-            _lastAnnouncedChoiceText = null;
+            _lastAnnouncedChoiceSignature = null;
             _lastEmittedAnnouncementKey = null;
             _lastLiveSubtitleText = null;
             _lastLiveSpeakerBubbleText = null;
+            _lastMouseHoverText = null;
+            _lastMouseHoverSignature = null;
             if (ShouldFlushReplayCueOnSceneEnter(sceneName))
                 _screenreader?.ClearReplayCue();
         }
@@ -91,6 +94,13 @@ public class SpecificTextAnnouncer
             AnnounceScreenByInstance("IntroController");
             AnnounceScreenByInstance("SkipIntro");
             var forceComicRead = IsComicScene(sceneName) && IsPromptShortcutPressed();
+            if (forceComicRead && TryAnnounceFullComicText())
+            {
+                AnnounceDialogueScreen();
+                AnnounceCurrentSelection();
+                AnnounceCurrentHover();
+                return;
+            }
             AnnounceAllTextComponents(sceneChanged || forceComicRead, includeInactive: false, ignoreVisibility: false);
             AnnounceDialogueScreen();
             AnnounceCurrentSelection();
@@ -108,21 +118,29 @@ public class SpecificTextAnnouncer
         AnnounceHUD();
         var suppressHover = false;
         var suppressSelection = false;
-        AnnouncePaperwork(ref suppressHover, ref suppressSelection);
+        var officeGameplayScene = IsOfficeGameplayScene(sceneName);
+        if (officeGameplayScene)
+            AnnouncePaperwork(ref suppressHover, ref suppressSelection);
         AnnounceLetterOfFate();
         AnnounceConfirmScreens();
         AnnounceGallery();
-        AnnouncePhone(ref suppressHover, ref suppressSelection);
+        if (officeGameplayScene)
+            AnnouncePhone(ref suppressHover, ref suppressSelection);
         AnnounceVoteCounter();
         AnnounceDecisionCoinFlipResult();
-        AnnounceChaosGlobeScore(ref suppressHover, ref suppressSelection);
-        AnnounceLampPowerChange();
-        if (!suppressSelection && !_screenreader.IsBusy)
+        if (officeGameplayScene)
+        {
+            AnnounceChaosGlobeScore(ref suppressHover, ref suppressSelection);
+            AnnounceLampPowerChange();
+        }
+        var nav = UiNavigationHandler.Instance;
+        var uiAnnouncementContext = (nav?.IsMenuUiActiveForAnnouncements ?? false)
+            || (nav?.IsDialogUiActiveForAnnouncements ?? false);
+        if (!suppressSelection && !_screenreader.IsBusy && uiAnnouncementContext)
             AnnounceCurrentSelection();
-        if (!suppressHover)
+        if (!suppressHover && uiAnnouncementContext)
             AnnounceCurrentHover();
-        if (!suppressHover
-            && !(UiNavigationHandler.Instance?.IsDialogUiActiveForAnnouncements ?? false))
+        if (!suppressHover)
             AnnounceMouseHover();
 
     }
@@ -244,7 +262,7 @@ public class SpecificTextAnnouncer
                 !string.Equals(_lastLiveSubtitleText, normalized, StringComparison.Ordinal))
             {
                 _lastLiveSubtitleText = normalized;
-                _screenreader?.AnnouncePriority(normalized);
+                AnnounceContent(normalized, priority: true, sourceKeyOverride: "live:subtitle");
             }
         }
         else
@@ -259,7 +277,7 @@ public class SpecificTextAnnouncer
                 !string.Equals(_lastLiveSpeakerBubbleText, normalized, StringComparison.Ordinal))
             {
                 _lastLiveSpeakerBubbleText = normalized;
-                _screenreader?.AnnouncePriority(normalized);
+                AnnounceContent(normalized, priority: true, sourceKeyOverride: "live:speaker-bubble");
             }
         }
         else
@@ -281,6 +299,14 @@ public class SpecificTextAnnouncer
         object speakerBubble;
         try
         {
+            var isActiveMethod = _speechBubbleManagerType.GetMethod("IsBubbleSpeechActive", BindingFlags.Instance | BindingFlags.Public);
+            if (isActiveMethod != null)
+            {
+                var activeObj = isActiveMethod.Invoke(manager, null);
+                if (activeObj is bool active && !active)
+                    return false;
+            }
+
             var method = _speechBubbleManagerType.GetMethod("GetSpeakerBubble", BindingFlags.Instance | BindingFlags.Public);
             if (method == null)
                 return false;
@@ -294,6 +320,16 @@ public class SpecificTextAnnouncer
 
         if (speakerBubble == null)
             return false;
+
+        if (!IsComponentInActiveScene(speakerBubble))
+            return false;
+
+        if (ReflectionUtils.TryGetProperty(speakerBubble.GetType(), speakerBubble, "gameObject", out var speakerBubbleGo)
+            && speakerBubbleGo != null
+            && !IsGameObjectActive(speakerBubbleGo))
+        {
+            return false;
+        }
 
         text = GetSpeechBubbleText(speakerBubble);
         return !string.IsNullOrWhiteSpace(text);
@@ -1907,7 +1943,9 @@ public class SpecificTextAnnouncer
         if (currentRaw == null)
         {
             if (Environment.TickCount - _lastSelectedSeenTick > FocusNullResetGraceMs)
+            {
                 _lastSelectedGameObject = null;
+            }
             return;
         }
 
@@ -1916,7 +1954,10 @@ public class SpecificTextAnnouncer
         if (ReferenceEquals(current, _lastSelectedGameObject))
             return;
 
-        if (!IsSelectableUsable(current))
+        var nav = UiNavigationHandler.Instance;
+        var requireUsable = !(nav?.IsMenuUiActiveForAnnouncements ?? false)
+            && !(nav?.IsDialogUiActiveForAnnouncements ?? false);
+        if (requireUsable && !IsSelectableUsable(current))
             return;
 
         _lastSelectedGameObject = current;
@@ -1928,9 +1969,6 @@ public class SpecificTextAnnouncer
             return;
 
         if (ShouldSuppressNonChoiceDialogueControlAnnouncement(current))
-            return;
-
-        if (TryAnnounceBarHoverFromVirtualCursor())
             return;
 
         if (TryAnnounceMenuChoice(current))
@@ -1973,7 +2011,9 @@ public class SpecificTextAnnouncer
         if (currentRaw == null)
         {
             if (Environment.TickCount - _lastHoveredSeenTick > FocusNullResetGraceMs)
+            {
                 _lastHoveredGameObject = null;
+            }
             return;
         }
 
@@ -1982,7 +2022,10 @@ public class SpecificTextAnnouncer
         if (ReferenceEquals(current, _lastHoveredGameObject))
             return;
 
-        if (!IsSelectableUsable(current))
+        var nav = UiNavigationHandler.Instance;
+        var requireUsable = !(nav?.IsMenuUiActiveForAnnouncements ?? false)
+            && !(nav?.IsDialogUiActiveForAnnouncements ?? false);
+        if (requireUsable && !IsSelectableUsable(current))
             return;
 
         _lastHoveredGameObject = current;
@@ -1994,9 +2037,6 @@ public class SpecificTextAnnouncer
             return;
 
         if (ShouldSuppressNonChoiceDialogueControlAnnouncement(current))
-            return;
-
-        if (TryAnnounceBarHoverFromVirtualCursor())
             return;
 
         if (TryAnnounceMenuChoice(current))
@@ -2038,15 +2078,6 @@ public class SpecificTextAnnouncer
         if (nav == null)
             return;
 
-        if (TryAnnounceBarHoverFromVirtualCursor())
-            return;
-
-        if (TryAnnounceBarHoverFromMouse())
-            return;
-
-        if (nav.IsBarSceneActiveForAnnouncements)
-            return;
-
         var hovered = GetCurrentHoveredGameObject(GetCurrentEventSystem());
         if (ShouldSuppressNonChoiceDialogueControlAnnouncement(hovered))
             return;
@@ -2068,12 +2099,28 @@ public class SpecificTextAnnouncer
             if (nav.IsMenuUiActiveForAnnouncements)
                 return;
 
-            if (string.Equals(_lastMouseHoverText, text, StringComparison.Ordinal))
+            var hoverSignature = nav.TryGetMouseHoverSignature(out var sig) ? sig : null;
+            if (!string.IsNullOrWhiteSpace(hoverSignature)
+                && string.Equals(_lastMouseHoverSignature, hoverSignature, StringComparison.Ordinal))
                 return;
 
-            _lastMouseHoverText = text;
+            var hoverKey = BuildAnnouncementDedupKey(text);
+            if (!string.IsNullOrWhiteSpace(hoverKey)
+                && string.Equals(_lastMouseHoverText, hoverKey, StringComparison.Ordinal))
+                return;
+
+            _lastMouseHoverSignature = hoverSignature;
+            _lastMouseHoverText = hoverKey ?? text;
             AnnounceContent(text, priority: false);
+            return;
         }
+
+        // Bar fallback: only use scene-object name probing when normal interactable hover
+        // resolution has no usable text.
+        if (TryAnnounceBarHoverFromVirtualCursor())
+            return;
+
+        TryAnnounceBarHoverFromMouse();
     }
 
     private bool TryAnnounceBarHoverFromVirtualCursor()
@@ -2085,10 +2132,12 @@ public class SpecificTextAnnouncer
         if (!nav.TryGetBarHoverNameFromVirtualCursor(out var name))
             return false;
 
-        if (string.Equals(_lastMouseHoverText, name, StringComparison.Ordinal))
-            return true;
+        var hoverKey = BuildAnnouncementDedupKey(name);
+        if (!string.IsNullOrWhiteSpace(hoverKey)
+            && string.Equals(_lastMouseHoverText, hoverKey, StringComparison.Ordinal))
+            return false;
 
-        _lastMouseHoverText = name;
+        _lastMouseHoverText = hoverKey ?? name;
         AnnounceContent(name, priority: false);
         return true;
     }
@@ -2102,10 +2151,12 @@ public class SpecificTextAnnouncer
         if (!nav.TryGetBarHoverNameFromMouse(out var name))
             return false;
 
-        if (string.Equals(_lastMouseHoverText, name, StringComparison.Ordinal))
-            return true;
+        var hoverKey = BuildAnnouncementDedupKey(name);
+        if (!string.IsNullOrWhiteSpace(hoverKey)
+            && string.Equals(_lastMouseHoverText, hoverKey, StringComparison.Ordinal))
+            return false;
 
-        _lastMouseHoverText = name;
+        _lastMouseHoverText = hoverKey ?? name;
         AnnounceContent(name, priority: false);
         return true;
     }
@@ -2131,7 +2182,7 @@ public class SpecificTextAnnouncer
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
-        return TryAnnounceChoiceText(text);
+        return TryAnnounceChoiceText(text, selectable ?? gameObject);
     }
 
     private bool ShouldSuppressNonChoiceDialogueControlAnnouncement(object gameObject)
@@ -2176,7 +2227,7 @@ public class SpecificTextAnnouncer
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
-        return TryAnnounceChoiceText(text);
+        return TryAnnounceChoiceText(text, selectable);
     }
 
     private string GetMenuSelectableAnnouncementText(object selectable)
@@ -2259,7 +2310,7 @@ public class SpecificTextAnnouncer
             if (string.IsNullOrWhiteSpace(text))
                 return false;
 
-            return TryAnnounceChoiceText(text);
+            return TryAnnounceChoiceText(text, selectable);
         }
 
         return false;
@@ -2290,10 +2341,10 @@ public class SpecificTextAnnouncer
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
-        return TryAnnounceChoiceText(text);
+        return TryAnnounceChoiceText(text, selectable ?? bubble ?? gameObject);
     }
 
-    private bool TryAnnounceChoiceText(string text)
+    private bool TryAnnounceChoiceText(string text, object source)
     {
         if (string.IsNullOrWhiteSpace(text))
             return false;
@@ -2302,12 +2353,46 @@ public class SpecificTextAnnouncer
         if (string.IsNullOrWhiteSpace(normalized))
             return false;
 
-        if (string.Equals(_lastAnnouncedChoiceText, normalized, StringComparison.Ordinal))
+        var sourceKey = GetChoiceSourceKey(source);
+        var signature = $"{sourceKey}|{normalized}";
+        if (string.Equals(_lastAnnouncedChoiceSignature, signature, StringComparison.Ordinal))
             return true;
 
-        _lastAnnouncedChoiceText = normalized;
-        AnnounceContent(normalized, priority: true);
+        _lastAnnouncedChoiceSignature = signature;
+        AnnounceContent(normalized, priority: true, dedupKeyOverride: signature, sourceKeyOverride: sourceKey);
         return true;
+    }
+
+    private string GetChoiceSourceKey(object source)
+    {
+        if (source == null)
+            return "choice:none";
+
+        var selectable = source;
+        if (_selectableType != null)
+        {
+            var parentSelectable = GetComponentInParent(source, _selectableType);
+            if (parentSelectable != null)
+                selectable = parentSelectable;
+        }
+
+        object gameObject = null;
+        ReflectionUtils.TryGetProperty(selectable.GetType(), selectable, "gameObject", out gameObject);
+        gameObject ??= selectable;
+
+        try
+        {
+            var getInstanceId = gameObject.GetType().GetMethod("GetInstanceID", BindingFlags.Instance | BindingFlags.Public);
+            var id = getInstanceId?.Invoke(gameObject, null);
+            if (id != null)
+                return $"choice:id:{id}";
+        }
+        catch
+        {
+            // Ignore and use object identity fallback.
+        }
+
+        return $"choice:obj:{RuntimeHelpers.GetHashCode(gameObject)}";
     }
 
     private object GetComponentInParent(object gameObject, string typeName)
@@ -3137,6 +3222,11 @@ public class SpecificTextAnnouncer
         if (!TryGetCurrentSceneName(out var sceneName) || string.IsNullOrWhiteSpace(sceneName))
             return true;
 
+        // ElevatorManager reports "Comic" while Unity scene names are IntroComic/AltIntroComic/EndComic.
+        // Do not scene-filter component reads in comic mode so forced replay works reliably.
+        if (string.Equals(sceneName, "Comic", StringComparison.OrdinalIgnoreCase))
+            return true;
+
         try
         {
             if (!ReflectionUtils.TryGetProperty(component.GetType(), component, "gameObject", out var gameObject) || gameObject == null)
@@ -3150,6 +3240,9 @@ public class SpecificTextAnnouncer
             var nameProp = scene.GetType().GetProperty("name", BindingFlags.Instance | BindingFlags.Public);
             var name = nameProp?.GetValue(scene) as string;
             if (string.IsNullOrWhiteSpace(name))
+                return true;
+
+            if (string.Equals(name, "DontDestroyOnLoad", StringComparison.OrdinalIgnoreCase))
                 return true;
 
             return string.Equals(name, sceneName, StringComparison.OrdinalIgnoreCase);
@@ -3181,12 +3274,12 @@ public class SpecificTextAnnouncer
         return true;
     }
 
-    private void AnnounceContent(string text, bool priority)
+    private void AnnounceContent(string text, bool priority, string dedupKeyOverride = null, string sourceKeyOverride = null)
     {
         if (string.IsNullOrWhiteSpace(text) || _screenreader == null)
             return;
 
-        var key = BuildAnnouncementDedupKey(text);
+        var key = string.IsNullOrWhiteSpace(dedupKeyOverride) ? BuildAnnouncementDedupKey(text) : dedupKeyOverride;
         if (!string.IsNullOrWhiteSpace(key)
             && string.Equals(key, _lastEmittedAnnouncementKey, StringComparison.Ordinal))
         {
@@ -3196,9 +3289,16 @@ public class SpecificTextAnnouncer
         _lastEmittedAnnouncementKey = key;
         _screenreader.SuppressHoverFor(500);
         if (priority)
-            _screenreader.AnnouncePriority(text);
+        {
+            if (!string.IsNullOrWhiteSpace(sourceKeyOverride))
+                _screenreader.AnnouncePriorityWithSource(text, sourceKeyOverride);
+            else
+                _screenreader.AnnouncePriority(text);
+        }
         else
+        {
             _screenreader.Announce(text);
+        }
     }
 
     private static string BuildAnnouncementDedupKey(string text)
@@ -3832,6 +3932,64 @@ public class SpecificTextAnnouncer
             || string.Equals(sceneName, "Office", StringComparison.OrdinalIgnoreCase)          // Bar / office flow scene
             || string.Equals(sceneName, "Shop", StringComparison.OrdinalIgnoreCase)            // Mortimer's Emporium
             || string.Equals(sceneName, "DressingRoom", StringComparison.OrdinalIgnoreCase);   // Dressing room
+    }
+
+    private static bool IsOfficeGameplayScene(string sceneName)
+    {
+        if (string.IsNullOrWhiteSpace(sceneName))
+            return false;
+
+        return string.Equals(sceneName, "Desktop", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(sceneName, "Office", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool TryAnnounceFullComicText()
+    {
+        var lines = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var textType in new[] { _tmpTextType, _uiTextType })
+        {
+            if (textType == null)
+                continue;
+
+            foreach (var component in FindObjectsOfType(textType))
+            {
+                if (component == null)
+                    continue;
+
+                if (!IsComponentInActiveScene(component))
+                    continue;
+
+                if (!IsVisible(component))
+                    continue;
+
+                var text = GetTextValue(component);
+                text = TextSanitizer.StripRichTextTags(text)?.Trim();
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+
+                if (IsPlaceholderValue(text))
+                    continue;
+
+                if (!seen.Add(text))
+                    continue;
+
+                lines.Add(text);
+            }
+        }
+
+        if (lines.Count == 0 || _screenreader == null)
+            return false;
+
+        var combined = string.Join(". ", lines);
+        if (string.IsNullOrWhiteSpace(combined))
+            return false;
+
+        _lastEmittedAnnouncementKey = null;
+        _screenreader.SuppressHoverFor(2000);
+        _screenreader.AnnouncePriorityReplay(combined);
+        return true;
     }
 
     private static string FormatNumber(object value)
