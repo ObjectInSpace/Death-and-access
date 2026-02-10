@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 public class SpecificTextAnnouncer
 {
     private const int FocusNullResetGraceMs = 500;
+    private const int LiveDialogueFocusSuppressMs = 1200;
     private readonly ConditionalWeakTable<object, LastTextHolder> _lastByComponent = new();
     private string _lastMoneyNotifyText;
     private bool _moneyNotifyVisible;
@@ -50,6 +51,8 @@ public class SpecificTextAnnouncer
     private string _lastEmittedAnnouncementKey;
     private bool _promptReplayHandledInUpdate;
     private bool _liveDialogueListenerEnabled;
+    private int _suppressDialogueFocusAnnouncementsUntilTick;
+    private string _pendingDialogChoiceText;
     private string _lastLiveSubtitleText;
     private string _lastLiveSpeakerBubbleText;
     private readonly Dictionary<string, object> _keyCodes = new(StringComparer.OrdinalIgnoreCase);
@@ -69,11 +72,13 @@ public class SpecificTextAnnouncer
         if (!TryGetCurrentSceneName(out var sceneName))
             return;
 
-        var sceneChanged = !string.Equals(sceneName, _lastSceneName, StringComparison.Ordinal);
+        var sceneChanged = !string.Equals(sceneName, _lastSceneName, StringComparison.OrdinalIgnoreCase);
         _lastSceneName = sceneName;
         if (sceneChanged)
         {
             _lastAnnouncedChoiceText = null;
+            _lastEmittedAnnouncementKey = null;
+            _pendingDialogChoiceText = null;
             _lastLiveSubtitleText = null;
             _lastLiveSpeakerBubbleText = null;
             if (ShouldFlushReplayCueOnSceneEnter(sceneName))
@@ -84,6 +89,7 @@ public class SpecificTextAnnouncer
         if (!IsComicScene(sceneName))
             TryReplayDialogShortcut();
         HandleLiveDialogueListeners();
+        TryFlushDeferredDialogChoice();
 
         if (IsIntroOrComicScene(sceneName))
         {
@@ -231,6 +237,8 @@ public class SpecificTextAnnouncer
             _liveDialogueListenerEnabled = !_liveDialogueListenerEnabled;
             _lastLiveSubtitleText = null;
             _lastLiveSpeakerBubbleText = null;
+            if (!_liveDialogueListenerEnabled)
+                _pendingDialogChoiceText = null;
         }
 
         if (!_liveDialogueListenerEnabled)
@@ -244,6 +252,7 @@ public class SpecificTextAnnouncer
             {
                 _lastLiveSubtitleText = normalized;
                 _screenreader?.AnnouncePriority(normalized);
+                _suppressDialogueFocusAnnouncementsUntilTick = Environment.TickCount + LiveDialogueFocusSuppressMs;
             }
         }
         else
@@ -259,6 +268,7 @@ public class SpecificTextAnnouncer
             {
                 _lastLiveSpeakerBubbleText = normalized;
                 _screenreader?.AnnouncePriority(normalized);
+                _suppressDialogueFocusAnnouncementsUntilTick = Environment.TickCount + LiveDialogueFocusSuppressMs;
             }
         }
         else
@@ -1926,6 +1936,9 @@ public class SpecificTextAnnouncer
         if (!ShouldAnnounceForGameObject(current))
             return;
 
+        if (ShouldSuppressDialogueUiFocusAnnouncements())
+            return;
+
         if (TryAnnounceBarHoverFromVirtualCursor())
             return;
 
@@ -1987,6 +2000,9 @@ public class SpecificTextAnnouncer
             return;
 
         if (!ShouldAnnounceForGameObject(current))
+            return;
+
+        if (ShouldSuppressDialogueUiFocusAnnouncements())
             return;
 
         if (TryAnnounceBarHoverFromVirtualCursor())
@@ -2121,7 +2137,41 @@ public class SpecificTextAnnouncer
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
+        if (_liveDialogueListenerEnabled && TryGetActiveDialoguePromptText(out _))
+        {
+            var normalized = TextSanitizer.StripRichTextTags(text)?.Trim();
+            if (!string.IsNullOrWhiteSpace(normalized))
+                _pendingDialogChoiceText = normalized;
+
+            _suppressDialogueFocusAnnouncementsUntilTick = Environment.TickCount + LiveDialogueFocusSuppressMs;
+            return true;
+        }
+
         return TryAnnounceChoiceText(text);
+    }
+
+    private bool ShouldSuppressDialogueUiFocusAnnouncements()
+    {
+        if (!_liveDialogueListenerEnabled)
+            return false;
+
+        if (Environment.TickCount > _suppressDialogueFocusAnnouncementsUntilTick)
+            return false;
+
+        return TryGetActiveDialoguePromptText(out _);
+    }
+
+    private void TryFlushDeferredDialogChoice()
+    {
+        if (string.IsNullOrWhiteSpace(_pendingDialogChoiceText))
+            return;
+
+        if (ShouldSuppressDialogueUiFocusAnnouncements())
+            return;
+
+        var pending = _pendingDialogChoiceText;
+        _pendingDialogChoiceText = null;
+        TryAnnounceChoiceText(pending);
     }
 
     private bool TryAnnounceMenuChoice(object gameObject)
