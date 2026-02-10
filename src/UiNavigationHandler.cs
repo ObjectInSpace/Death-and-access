@@ -144,6 +144,9 @@ public sealed class UiNavigationHandler
     private string _elevatorSceneName;
     private readonly HashSet<string> _allowedSceneNames = new(StringComparer.OrdinalIgnoreCase);
     private bool _sceneChanging;
+    private bool _lastPauseOverlayActive;
+    private int _suppressSubmitUntilTick;
+    private const int PauseOverlaySubmitSuppressMs = 300;
 
     public void Initialize(ScreenreaderProvider screenreader)
     {
@@ -358,6 +361,11 @@ public sealed class UiNavigationHandler
         if (IsSceneChanging())
             return;
 
+        var pauseOverlayActive = IsMenuActive();
+        if (_lastPauseOverlayActive && !pauseOverlayActive)
+            _suppressSubmitUntilTick = Environment.TickCount + PauseOverlaySubmitSuppressMs;
+        _lastPauseOverlayActive = pauseOverlayActive;
+
         SyncEventSystemSelectionIfNeeded();
         EnsureDialogSelection();
         EnsureSpeechBubbleSelection();
@@ -376,6 +384,11 @@ public sealed class UiNavigationHandler
         }
         var direction = GetNavigationDirection(axisX, axisY);
         var submitInteractPressed = IsSubmitPressedForInteractables();
+        if (!pauseOverlayActive && Environment.TickCount <= _suppressSubmitUntilTick)
+        {
+            submitInteractPressed = false;
+            _submitHeld = true;
+        }
         if (submitInteractPressed && TryHandleIntroSkip())
             return;
         if (direction != NavigationDirection.None)
@@ -388,6 +401,20 @@ public sealed class UiNavigationHandler
 
         if (TryAdjustFocusedSlider(direction))
             return;
+
+        if (IsMenuActive() && !IsOfficeActive())
+        {
+            SyncUnifiedCursorForUi(preferKeyboardSelection: false);
+            if (direction != NavigationDirection.None)
+            {
+                _suppressMouseUiSyncFromKeyboard = true;
+                if (!TryMoveMenuCursorToNearestOption(direction))
+                    MoveUnifiedCursorByDirection(direction);
+            }
+            if (submitInteractPressed)
+                SubmitInteractable();
+            return;
+        }
 
         if (IsDialogActive() || IsSpeechBubbleDialogActive())
         {
@@ -419,20 +446,6 @@ public sealed class UiNavigationHandler
                 SubmitInteractable();
             }
 
-            return;
-        }
-
-        if (IsMenuActive() && !IsOfficeActive())
-        {
-            SyncUnifiedCursorForUi(preferKeyboardSelection: false);
-            if (direction != NavigationDirection.None)
-            {
-                _suppressMouseUiSyncFromKeyboard = true;
-                if (!TryMoveMenuCursorToNearestOption(direction))
-                    MoveUnifiedCursorByDirection(direction);
-            }
-            if (submitInteractPressed)
-                SubmitInteractable();
             return;
         }
 
@@ -650,7 +663,7 @@ public sealed class UiNavigationHandler
 
     private void EnsureDialogSelection()
     {
-        if (!IsDialogActive())
+        if (!IsDialogActive() || IsMenuActive())
             return;
 
         var roots = GetActiveDialogRoots();
@@ -895,6 +908,9 @@ public sealed class UiNavigationHandler
 
     private bool HandleOfficeShortcuts()
     {
+        if (IsMenuActive())
+            return false;
+
         if (IsDialogActive() || IsSpeechBubbleDialogActive())
         {
             if (TryHandleConfirmDialogYesNoShortcut())
@@ -903,9 +919,6 @@ public sealed class UiNavigationHandler
                 return true;
             return false;
         }
-
-        if (IsMenuActive())
-            return false;
 
         if (IsDressingRoomActive())
         {
