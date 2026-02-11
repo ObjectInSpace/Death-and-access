@@ -91,9 +91,12 @@ public class SpecificTextAnnouncer
 
         if (IsIntroOrComicScene(sceneName))
         {
-            AnnounceScreenByInstance("IntroController");
-            AnnounceScreenByInstance("SkipIntro");
             var forceComicRead = IsComicScene(sceneName) && IsPromptShortcutPressed();
+            var introUiActive = IsRootActiveByTypeName("IntroController")
+                                || IsRootActiveByTypeName("SkipIntro");
+            if (!introUiActive && !forceComicRead)
+                return;
+
             if (forceComicRead && TryAnnounceFullComicText())
             {
                 AnnounceDialogueScreen();
@@ -101,7 +104,6 @@ public class SpecificTextAnnouncer
                 AnnounceCurrentHover();
                 return;
             }
-            AnnounceAllTextComponents(sceneChanged || forceComicRead, includeInactive: false, ignoreVisibility: false);
             AnnounceDialogueScreen();
             AnnounceCurrentSelection();
             AnnounceCurrentHover();
@@ -154,6 +156,12 @@ public class SpecificTextAnnouncer
         if (!suppressHover && !uiAnnouncementContext)
             AnnounceMouseHover();
 
+    }
+
+    private bool IsRootActiveByTypeName(string typeName)
+    {
+        var instance = GetStaticInstance(typeName);
+        return instance != null && IsRootActive(instance);
     }
 
     public void Cleanup()
@@ -3138,6 +3146,10 @@ public class SpecificTextAnnouncer
         if (text.IndexOf("shop item template", StringComparison.OrdinalIgnoreCase) >= 0)
             return;
 
+        // Prevent demo-end copy from being announced during startup/menu scenes.
+        if (IsDemoThanksText(text) && !IsDemoEndScreenActive())
+            return;
+
         if (IsElevatorSceneActive() && IsMoneyNotificationText(text) && !IsMoneyNotificationComponent(component))
             return;
 
@@ -3186,6 +3198,24 @@ public class SpecificTextAnnouncer
 
         holder.Text = text;
         AnnounceContent(text, priority: false);
+    }
+
+    private bool IsDemoThanksText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var normalized = TextSanitizer.StripRichTextTags(text)?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            return false;
+
+        return normalized.IndexOf("thanks for playing the demo", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private bool IsDemoEndScreenActive()
+    {
+        var instance = GetStaticInstance("DemoEndScreen");
+        return instance != null && IsRootActive(instance);
     }
 
     private bool IsMoneyNotificationComponent(object component)
