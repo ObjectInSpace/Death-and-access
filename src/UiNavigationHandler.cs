@@ -662,6 +662,9 @@ public sealed class UiNavigationHandler
         if (direction == NavigationDirection.None || !ShouldUseUnifiedWorldDirectionalNavigation())
             return false;
 
+        if (IsBarSceneActive() && TryMoveBarFocusByCycle(direction))
+            return true;
+
         var targets = IsElevatorActive()
             ? GetEnabledElevatorButtons()
             : IsDressingRoomActive()
@@ -865,6 +868,81 @@ public sealed class UiNavigationHandler
 
         _lastSnappedWorldInteractable = best;
         SetInteractableFocus(best);
+        return true;
+    }
+
+    private bool TryMoveBarFocusByCycle(NavigationDirection direction)
+    {
+        var targets = GetWorldInteractableTargets();
+        if (targets.Count == 0)
+            targets = GetSceneNumberRowTargets();
+        if (targets.Count == 0)
+            return false;
+
+        var ordered = new List<object>();
+        foreach (var target in targets)
+        {
+            var resolved = ResolveInteractableForFocus(target) ?? target;
+            if (resolved == null || !IsInteractableActive(resolved))
+                continue;
+
+            var duplicate = false;
+            foreach (var existing in ordered)
+            {
+                if (IsSameWorldTarget(existing, resolved))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+                ordered.Add(resolved);
+        }
+
+        if (ordered.Count == 0)
+            return false;
+
+        ordered.Sort((a, b) =>
+            string.Compare(
+                GetDirectionalTargetOrderKey(a),
+                GetDirectionalTargetOrderKey(b),
+                StringComparison.Ordinal));
+
+        var focused = ResolveInteractableForFocus(_lastFocusedInteractable) ?? _lastFocusedInteractable;
+        var index = -1;
+        if (focused != null)
+        {
+            for (var i = 0; i < ordered.Count; i++)
+            {
+                if (IsSameWorldTarget(ordered[i], focused))
+                {
+                    index = i;
+                    break;
+                }
+            }
+        }
+
+        if (index < 0)
+            index = 0;
+
+        var step = direction == NavigationDirection.Left || direction == NavigationDirection.Up ? -1 : 1;
+        var nextIndex = (index + step + ordered.Count) % ordered.Count;
+        var next = ordered[nextIndex];
+        if (next == null)
+            return false;
+
+        if (!TryMoveCursorToInteractable(next))
+            return false;
+
+        var now = Environment.TickCount;
+        _keyboardNavUntilTick = now + 500;
+        _keyboardFocusUntilTick = now + 1500;
+        _keyboardFocusActive = true;
+        _virtualCursorMovedSinceLastSubmit = false;
+
+        _lastSnappedWorldInteractable = next;
+        SetInteractableFocus(next);
         return true;
     }
 
