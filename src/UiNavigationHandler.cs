@@ -148,9 +148,11 @@ public sealed class UiNavigationHandler
     private readonly HashSet<string> _allowedSceneNames = new(StringComparer.OrdinalIgnoreCase);
     private bool _sceneChanging;
     private bool _lastPauseOverlayActive;
+    private bool _lastDialogOverlayActive;
     private int _suppressSubmitUntilTick;
     private int _suppressVirtualMouseButtonUntilTick;
     private const int PauseOverlaySubmitSuppressMs = 300;
+    private const int DialogExitSubmitSuppressMs = 250;
     private const int VirtualMouseButtonSuppressMs = 120;
     private const int UiDirectionalMoveDebounceMs = 90;
     private static int s_lastUiDirectionalMoveTick;
@@ -489,9 +491,18 @@ public sealed class UiNavigationHandler
             return;
 
         var pauseOverlayActive = IsMenuActive();
+        var dialogOverlayActive = IsDialogActive() || IsSpeechBubbleDialogActive() || IsDialogueManagerConversationActive();
         if (_lastPauseOverlayActive && !pauseOverlayActive)
             _suppressSubmitUntilTick = Environment.TickCount + PauseOverlaySubmitSuppressMs;
         _lastPauseOverlayActive = pauseOverlayActive;
+        if (_lastDialogOverlayActive && !dialogOverlayActive && IsBarSceneActive())
+        {
+            var suppressUntil = Environment.TickCount + DialogExitSubmitSuppressMs;
+            if (suppressUntil > _suppressSubmitUntilTick)
+                _suppressSubmitUntilTick = suppressUntil;
+            _submitHeld = true;
+        }
+        _lastDialogOverlayActive = dialogOverlayActive;
 
         SyncEventSystemSelectionIfNeeded();
         EnsureDialogSelection();
