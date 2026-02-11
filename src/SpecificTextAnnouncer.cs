@@ -94,7 +94,10 @@ public class SpecificTextAnnouncer
             var forceComicRead = IsComicScene(sceneName) && IsPromptShortcutPressed();
             var introUiActive = IsRootActiveByTypeName("IntroController")
                                 || IsRootActiveByTypeName("SkipIntro");
-            if (!introUiActive && !forceComicRead)
+            var introNav = UiNavigationHandler.Instance;
+            var introUiContext = (introNav?.IsMenuUiActiveForAnnouncements ?? false)
+                || (introNav?.IsDialogUiActiveForAnnouncements ?? false);
+            if (!introUiActive && !introUiContext && !forceComicRead)
                 return;
 
             if (forceComicRead && TryAnnounceFullComicText())
