@@ -2257,6 +2257,9 @@ public class SpecificTextAnnouncer
         if (selectable == null)
             return null;
 
+        if (TryGetSliderMenuAnnouncementText(selectable, out var sliderAnnouncement))
+            return sliderAnnouncement;
+
         var text = GetFirstTextInChildren(selectable) ?? GetTextValue(selectable);
         if (IsUsableMenuAnnouncementText(text))
             return text;
@@ -2283,6 +2286,266 @@ public class SpecificTextAnnouncer
         }
 
         return null;
+    }
+
+    private bool TryGetSliderMenuAnnouncementText(object selectable, out string announcement)
+    {
+        announcement = null;
+        if (selectable == null)
+            return false;
+
+        var type = selectable.GetType();
+        var hasValue = type.GetProperty("value", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) != null;
+        var hasMin = type.GetProperty("minValue", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) != null;
+        var hasMax = type.GetProperty("maxValue", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) != null;
+        if (!hasValue || !hasMin || !hasMax)
+            return false;
+
+        var label = ResolveOptionsSliderLabel(selectable);
+
+        var value = 0f;
+        var min = 0f;
+        var max = 1f;
+        if (!TryGetFloatProperty(type, selectable, "value", out value))
+            return false;
+        TryGetFloatProperty(type, selectable, "minValue", out min);
+        TryGetFloatProperty(type, selectable, "maxValue", out max);
+
+        var percent = 0f;
+        var range = max - min;
+        if (Math.Abs(range) > 0.0001f)
+            percent = ((value - min) / range) * 100f;
+        percent = Math.Max(0f, Math.Min(100f, percent));
+
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            announcement = $"{Math.Round(percent):0}%";
+        }
+        else
+        {
+            // Use '%' to let screen readers localize pronunciation.
+            announcement = $"{label} {Math.Round(percent):0}%";
+        }
+        return true;
+    }
+
+    private string GetMenuSelectableLabelFromHierarchy(object selectable, int maxDepth)
+    {
+        var text = GetFirstTextInChildren(selectable) ?? GetTextValue(selectable);
+        if (IsUsableMenuAnnouncementText(text))
+            return text.Trim();
+
+        if (!ReflectionUtils.TryGetProperty(selectable.GetType(), selectable, "gameObject", out var gameObject) || gameObject == null)
+            return null;
+        if (!ReflectionUtils.TryGetProperty(gameObject.GetType(), gameObject, "transform", out var transform) || transform == null)
+            return null;
+
+        var current = transform;
+        for (var depth = 0; depth < maxDepth; depth++)
+        {
+            if (!ReflectionUtils.TryGetProperty(current.GetType(), current, "parent", out var parent) || parent == null)
+                break;
+            current = parent;
+
+            if (!ReflectionUtils.TryGetProperty(current.GetType(), current, "gameObject", out var parentGameObject) || parentGameObject == null)
+                continue;
+
+            text = GetFirstTextInChildren(parentGameObject);
+            if (IsUsableMenuAnnouncementText(text) && !LooksLikeNonSliderOptionLabel(text))
+                return text.Trim();
+        }
+
+        return null;
+    }
+
+    private string ResolveOptionsSliderLabel(object selectable)
+    {
+        var sliderKey = GetOptionsSliderKey(selectable);
+        var labelFromHierarchy = GetSiblingTextLabelForSelectable(selectable);
+        if (IsUsableMenuAnnouncementText(labelFromHierarchy))
+            return labelFromHierarchy.Trim();
+
+        // Fallbacks by known OptionsManager slider fields.
+        return sliderKey switch
+        {
+            "SliderVolumeMaster" => "Master",
+            "SliderVolumeGeneral" => "General",
+            "SliderVolumeVoice" => "Voice",
+            "SliderVolumeMusic" => "Music",
+            _ => null
+        };
+    }
+
+    private string GetOptionsSliderKey(object selectable)
+    {
+        var options = GetStaticInstance("OptionsManager");
+        if (options == null)
+            return null;
+
+        foreach (var fieldName in new[]
+        {
+            "SliderVolumeMaster",
+            "SliderVolumeGeneral",
+            "SliderVolumeVoice",
+            "SliderVolumeMusic"
+        })
+        {
+            var fieldValue = GetFieldValue(options, fieldName);
+            if (fieldValue == null)
+                continue;
+            if (IsSameUiTarget(fieldValue, selectable))
+                return fieldName;
+        }
+
+        return null;
+    }
+
+    private string GetSiblingTextLabelForSelectable(object selectable)
+    {
+        if (selectable == null)
+            return null;
+
+        if (!ReflectionUtils.TryGetProperty(selectable.GetType(), selectable, "gameObject", out var selectableGo) || selectableGo == null)
+            return null;
+        if (!ReflectionUtils.TryGetProperty(selectableGo.GetType(), selectableGo, "transform", out var selectableTransform) || selectableTransform == null)
+            return null;
+        if (!ReflectionUtils.TryGetProperty(selectableTransform.GetType(), selectableTransform, "parent", out var parent) || parent == null)
+            return null;
+
+        var childCountProp = parent.GetType().GetProperty("childCount", BindingFlags.Instance | BindingFlags.Public);
+        var getChildMethod = parent.GetType().GetMethod("GetChild", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(int) }, null);
+        if (childCountProp == null || getChildMethod == null)
+            return null;
+
+        if (childCountProp.GetValue(parent) is not int childCount || childCount <= 0)
+            return null;
+
+        for (var i = 0; i < childCount; i++)
+        {
+            object childTransform;
+            try
+            {
+                childTransform = getChildMethod.Invoke(parent, new object[] { i });
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (childTransform == null)
+                continue;
+
+            if (!ReflectionUtils.TryGetProperty(childTransform.GetType(), childTransform, "gameObject", out var childGo) || childGo == null)
+                continue;
+
+            if (ReferenceEquals(childGo, selectableGo) || IsChildOf(selectableGo, childGo) || IsChildOf(childGo, selectableGo))
+                continue;
+
+            var text = GetFirstTextInChildrenWithMaxDepth(childGo, 2);
+            if (IsUsableMenuAnnouncementText(text) && !LooksLikeNonSliderOptionLabel(text))
+                return text.Trim();
+        }
+
+        return null;
+    }
+
+    private string GetFirstTextInChildrenWithMaxDepth(object root, int maxDepth)
+    {
+        if (root == null || maxDepth < 0)
+            return null;
+
+        string TryGetTextAtRoot(object node)
+        {
+            var text = GetTextValue(node);
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+            return null;
+        }
+
+        var rootText = TryGetTextAtRoot(root);
+        if (!string.IsNullOrWhiteSpace(rootText))
+            return rootText;
+
+        if (!ReflectionUtils.TryGetProperty(root.GetType(), root, "transform", out var transform) || transform == null)
+            return null;
+
+        var childCountProp = transform.GetType().GetProperty("childCount", BindingFlags.Instance | BindingFlags.Public);
+        var getChildMethod = transform.GetType().GetMethod("GetChild", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(int) }, null);
+        if (childCountProp == null || getChildMethod == null)
+            return null;
+
+        string Search(object nodeTransform, int depth)
+        {
+            if (depth > maxDepth || nodeTransform == null)
+                return null;
+
+            if (childCountProp.GetValue(nodeTransform) is not int count || count <= 0)
+                return null;
+
+            for (var i = 0; i < count; i++)
+            {
+                object childTransform;
+                try
+                {
+                    childTransform = getChildMethod.Invoke(nodeTransform, new object[] { i });
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (childTransform == null)
+                    continue;
+
+                if (!ReflectionUtils.TryGetProperty(childTransform.GetType(), childTransform, "gameObject", out var childGo) || childGo == null)
+                    continue;
+
+                var text = TryGetTextAtRoot(childGo);
+                if (!string.IsNullOrWhiteSpace(text))
+                    return text;
+
+                var nested = Search(childTransform, depth + 1);
+                if (!string.IsNullOrWhiteSpace(nested))
+                    return nested;
+            }
+
+            return null;
+        }
+
+        return Search(transform, 1);
+    }
+
+    private bool IsSameUiTarget(object first, object second)
+    {
+        if (first == null || second == null)
+            return false;
+        if (ReferenceEquals(first, second))
+            return true;
+
+        if (ReflectionUtils.TryGetProperty(first.GetType(), first, "gameObject", out var firstGo) && firstGo != null
+            && ReflectionUtils.TryGetProperty(second.GetType(), second, "gameObject", out var secondGo) && secondGo != null)
+        {
+            if (ReferenceEquals(firstGo, secondGo))
+                return true;
+            if (IsChildOf(firstGo, secondGo) || IsChildOf(secondGo, firstGo))
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool LooksLikeNonSliderOptionLabel(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var normalized = TextSanitizer.StripRichTextTags(text)?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            return false;
+
+        return normalized.IndexOf("resolution", StringComparison.OrdinalIgnoreCase) >= 0
+            || normalized.IndexOf("fullscreen", StringComparison.OrdinalIgnoreCase) >= 0
+            || normalized.IndexOf("window", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private bool IsUsableMenuAnnouncementText(string text)
