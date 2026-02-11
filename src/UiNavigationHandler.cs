@@ -489,9 +489,9 @@ public sealed class UiNavigationHandler
         EnsureDialogSelection();
         EnsureSpeechBubbleSelection();
         EnsureMenuSelection();
-        if (TryHandleComicArrowScroll())
+        if (!pauseOverlayActive && TryHandleComicArrowScroll())
             return;
-        if (HandleOfficeShortcuts())
+        if (!pauseOverlayActive && HandleOfficeShortcuts())
             return;
 
         SampleAxes(out var axisX, out var axisY);
