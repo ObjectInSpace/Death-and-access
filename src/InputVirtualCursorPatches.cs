@@ -54,7 +54,11 @@ internal static class InputGetMouseButtonPatch
     private static bool Prefix(int button, ref bool __result)
     {
         var nav = UiNavigationHandler.Instance;
-        if (button != 0 || nav == null || !nav.IsVirtualCursorActive || nav.ShouldBypassVirtualMouseButtonPatch)
+        if (button != 0
+            || nav == null
+            || !nav.IsVirtualCursorActive
+            || nav.ShouldBypassVirtualMouseButtonPatch
+            || nav.ShouldSuppressVirtualMouseButton)
             return true;
 
         if (!VirtualMouseState.GetHeld())
@@ -77,7 +81,11 @@ internal static class InputGetMouseButtonDownPatch
     private static bool Prefix(int button, ref bool __result)
     {
         var nav = UiNavigationHandler.Instance;
-        if (button != 0 || nav == null || !nav.IsVirtualCursorActive || nav.ShouldBypassVirtualMouseButtonPatch)
+        if (button != 0
+            || nav == null
+            || !nav.IsVirtualCursorActive
+            || nav.ShouldBypassVirtualMouseButtonPatch
+            || nav.ShouldSuppressVirtualMouseButton)
             return true;
 
         if (!VirtualMouseState.GetDown())
@@ -100,7 +108,11 @@ internal static class InputGetMouseButtonUpPatch
     private static bool Prefix(int button, ref bool __result)
     {
         var nav = UiNavigationHandler.Instance;
-        if (button != 0 || nav == null || !nav.IsVirtualCursorActive || nav.ShouldBypassVirtualMouseButtonPatch)
+        if (button != 0
+            || nav == null
+            || !nav.IsVirtualCursorActive
+            || nav.ShouldBypassVirtualMouseButtonPatch
+            || nav.ShouldSuppressVirtualMouseButton)
             return true;
 
         if (!VirtualMouseState.GetUp())

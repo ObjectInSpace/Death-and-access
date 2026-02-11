@@ -48,6 +48,7 @@ public sealed class UiNavigationHandler
     private Type _markerType;
     private Type _eraserType;
     private Type _salaryCoinType;
+    private Type _dialogueManagerType;
     private Type _dialogueScreenType;
     private Type _speechBubbleManagerType;
     private Type _speechBubbleType;
@@ -148,7 +149,9 @@ public sealed class UiNavigationHandler
     private bool _sceneChanging;
     private bool _lastPauseOverlayActive;
     private int _suppressSubmitUntilTick;
+    private int _suppressVirtualMouseButtonUntilTick;
     private const int PauseOverlaySubmitSuppressMs = 300;
+    private const int VirtualMouseButtonSuppressMs = 120;
     private const int UiDirectionalMoveDebounceMs = 90;
     private static int s_lastUiDirectionalMoveTick;
 
@@ -163,6 +166,11 @@ public sealed class UiNavigationHandler
     internal bool IsVirtualCursorActive => _virtualCursorActive;
     internal bool ShouldBypassVirtualMousePositionPatch => _readingRawMousePosition;
     internal bool ShouldBypassVirtualMouseButtonPatch => ShouldUseUnifiedWorldDirectionalNavigation();
+    internal bool ShouldSuppressVirtualMouseButton => IsMenuActive()
+        || IsDialogActive()
+        || IsDialogueManagerConversationActive()
+        || IsSpeechBubbleDialogActive()
+        || Environment.TickCount <= _suppressVirtualMouseButtonUntilTick;
     internal bool IsDialogUiActiveForAnnouncements => IsDialogActive() || IsSpeechBubbleDialogActive();
     internal bool IsMenuUiActiveForAnnouncements => IsMenuActive();
     internal bool ShouldSuppressUiAxisNavigation => !IsGrimsOfficeSceneActive();
@@ -562,7 +570,10 @@ public sealed class UiNavigationHandler
             if (submitInteractPressed)
             {
                 if (confirmInstance == null && TrySubmitDialogueContinueOnly())
+                {
+                    SuppressVirtualMouseButtonTemporarily();
                     return;
+                }
 
                 SubmitInteractable();
             }
@@ -3056,7 +3067,32 @@ public sealed class UiNavigationHandler
 
     private bool IsDialogActive()
     {
-        return GetActiveDialogRoots().Count > 0;
+        return IsDialogueManagerConversationActive() || GetActiveDialogRoots().Count > 0;
+    }
+
+    private bool IsDialogueManagerConversationActive()
+    {
+        _dialogueManagerType ??= TypeResolver.Get("DialogueManager");
+        if (_dialogueManagerType == null)
+            return false;
+
+        var manager = GetStaticInstance(_dialogueManagerType);
+        if (manager == null)
+            return false;
+
+        try
+        {
+            var method = _dialogueManagerType.GetMethod("IsDialogueActive", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null)
+                return false;
+
+            var activeObj = method.Invoke(manager, null);
+            return activeObj is bool active && active;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private bool IsSpeechBubbleDialogActive()
@@ -3264,6 +3300,7 @@ public sealed class UiNavigationHandler
         _markerType ??= TypeResolver.Get("MarkerOfDeath");
         _eraserType ??= TypeResolver.Get("Eraser");
         _salaryCoinType ??= TypeResolver.Get("SalaryCoin");
+        _dialogueManagerType ??= TypeResolver.Get("DialogueManager");
         _dialogueScreenType ??= TypeResolver.Get("DialogueScreen");
         _speechBubbleManagerType ??= TypeResolver.Get("SpeechBubbleManager");
         _speechBubbleType ??= TypeResolver.Get("SpeechBubble");
@@ -6759,6 +6796,7 @@ public sealed class UiNavigationHandler
             {
                 if (TryActivateDialogSelectable(confirmTarget))
                 {
+                    SuppressVirtualMouseButtonTemporarily();
                     _virtualCursorMovedSinceLastSubmit = false;
                     return;
                 }
@@ -6767,6 +6805,16 @@ public sealed class UiNavigationHandler
 
         if (TrySubmitSpeechBubble())
         {
+            SuppressVirtualMouseButtonTemporarily();
+            _virtualCursorMovedSinceLastSubmit = false;
+            return;
+        }
+
+        // Dialogue continue must win over world/UI submit regardless of caller path
+        // (e.g. virtual cursor update loop in world scenes).
+        if (TrySubmitDialogueContinueOnly())
+        {
+            SuppressVirtualMouseButtonTemporarily();
             _virtualCursorMovedSinceLastSubmit = false;
             return;
         }
@@ -6877,12 +6925,14 @@ public sealed class UiNavigationHandler
 
             if (TryInvokeUiClickResult(uiTarget))
             {
+                SuppressVirtualMouseButtonIfUiLayerActive();
                 _virtualCursorMovedSinceLastSubmit = false;
                 return;
             }
 
             if (TryInvokeInteract(uiTarget))
             {
+                SuppressVirtualMouseButtonIfUiLayerActive();
                 _virtualCursorMovedSinceLastSubmit = false;
                 return;
             }
@@ -6891,6 +6941,7 @@ public sealed class UiNavigationHandler
             // element is under the cursor; continue to world interactable resolution.
             if (IsMenuActive() || IsDialogActive() || IsSpeechBubbleDialogActive())
             {
+                SuppressVirtualMouseButtonTemporarily();
                 _virtualCursorMovedSinceLastSubmit = false;
                 return;
             }
@@ -6966,6 +7017,19 @@ public sealed class UiNavigationHandler
         _virtualCursorMovedSinceLastSubmit = false;
 
         // No extra focus logic; rely on the virtual cursor + raycast.
+    }
+
+    private void SuppressVirtualMouseButtonTemporarily()
+    {
+        var suppressUntil = Environment.TickCount + VirtualMouseButtonSuppressMs;
+        if (suppressUntil > _suppressVirtualMouseButtonUntilTick)
+            _suppressVirtualMouseButtonUntilTick = suppressUntil;
+    }
+
+    private void SuppressVirtualMouseButtonIfUiLayerActive()
+    {
+        if (IsMenuActive() || IsDialogActive() || IsDialogueManagerConversationActive() || IsSpeechBubbleDialogActive())
+            SuppressVirtualMouseButtonTemporarily();
     }
 
     private bool TrySubmitSpeechBubble()
