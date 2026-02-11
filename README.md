@@ -13,6 +13,7 @@
 * Install MellonLoader (https://github.com/LavaGang/MelonLoader/releases ) and point it to your game
 * Copy the mod DLL and both NVDA controller client DLLs to the mods folder of your game:
   `NVDAControllerClient32.dll` and `NVDAControllerClient64.dll`
+* * Note: if you purchased the game on GOG, the game is an X86 executable which requires the 32-bit controller  client to detect NVDA. If you bought it elsewhere it is X64 and requires the 64-bit controller client. The mod is packaged with both and should work correctly in all cases. If you don't know what any of this means, just copy both clients and you'll be fine.
 * Launch Death and Taxes. If Mellonloader is working, a command window will open with info about the game. You should then hear screenreader (or TTS if no screenreader is detected) that the mod has loaded.
 * et voila!
 
@@ -50,6 +51,7 @@
 * r: radio
 * e: eraser
 * l: lamppp
+* t: toy
 * p: plant
 
 ### elevator:
@@ -70,28 +72,15 @@
 * shift+b: previous body
 * M: mirror (exit)
 
-### Mortimer's Emporium:
-
-* 1-3: hover shop item, read its name and description
-
-### Anywhere else:
+#### Anywhere else:
 * m: say current money
 * e: elevator
 * `: read last spoken dialog
+* ~: toggle automatic reading of dialog
 * 1-0: choose dialog option
-
-## The elevator doesn't work!
-
-* After leaving the office, you can't go to your quarters until you go to Fate's office.
-* You can't go back to your office until you end the day in your quarters
-* After ending the day in  your quarters, you must go to Grim's office before you can go to Fate's office.
-* the dressing room is unlocked after you purchase the mirror
-* The cerberus den is only open on weekends.
-* The elevator moves to your chosen location, which takes a few seconds.
 
 ## known issues/todos:
 
-* menu focus is messy
 * The eraser doesn't work with a number row shortcut, use arrow keys instead.
 * No support for hats!
 * broken Oink bank shortcut
