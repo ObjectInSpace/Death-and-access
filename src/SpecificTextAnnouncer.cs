@@ -136,11 +136,22 @@ public class SpecificTextAnnouncer
         var nav = UiNavigationHandler.Instance;
         var uiAnnouncementContext = (nav?.IsMenuUiActiveForAnnouncements ?? false)
             || (nav?.IsDialogUiActiveForAnnouncements ?? false);
-        if (!suppressSelection && !_screenreader.IsBusy && uiAnnouncementContext)
+        if (uiAnnouncementContext)
+        {
+            // UI focus announcements must win over gameplay suppressors so
+            // pause/menu items remain spoken when overlays are visible.
             AnnounceCurrentSelection();
-        if (!suppressHover && uiAnnouncementContext)
             AnnounceCurrentHover();
-        if (!suppressHover)
+        }
+        else
+        {
+            if (!suppressSelection)
+                AnnounceCurrentSelection();
+            if (!suppressHover)
+                AnnounceCurrentHover();
+        }
+
+        if (!suppressHover && !uiAnnouncementContext)
             AnnounceMouseHover();
 
     }
